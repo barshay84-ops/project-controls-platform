@@ -1,7 +1,8 @@
 # ============================================================
-# Project Controls & Optimization Platform
-# Streamlit Web App
-# גרסה מאוחדת, מקצועית ומתוקנת לשלב פיתוח מקומי
+# Tender & Project Controls Platform
+# גרסה מלאה ומתוקנת:
+# 1. בדיקת כדאיות מכרזים בתוך האתר
+# 2. בקרת פרויקט וניהול לו״ז מקובץ Excel
 # ============================================================
 
 import warnings
@@ -9,6 +10,8 @@ warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
 from io import BytesIO
 from collections import deque
+import itertools
+import html
 
 import numpy as np
 import pandas as pd
@@ -18,11 +21,11 @@ import plotly.graph_objects as go
 
 
 # ============================================================
-# 1. הגדרות עמוד ועיצוב
+# הגדרות עמוד ועיצוב
 # ============================================================
 
 st.set_page_config(
-    page_title="Project Controls Platform",
+    page_title="Tender & Project Controls Platform",
     page_icon="📊",
     layout="wide"
 )
@@ -45,6 +48,7 @@ st.markdown(
     section[data-testid="stSidebar"] {
         direction: rtl;
         text-align: right;
+        background-color: #f1f5f9;
     }
 
     h1, h2, h3, h4, h5, h6, p, label {
@@ -117,7 +121,7 @@ st.markdown(
         direction: rtl;
         text-align: right;
         color: #0f172a;
-        font-size: 30px;
+        font-size: 28px;
         font-weight: 800;
     }
 
@@ -133,20 +137,11 @@ st.markdown(
         direction: rtl;
         text-align: right;
         border-radius: 18px;
-        padding: 20px;
-        margin-top: 10px;
+        padding: 18px;
+        margin-top: 14px;
         margin-bottom: 18px;
         font-size: 16px;
         font-weight: 700;
-    }
-
-    .status-small {
-        direction: rtl;
-        text-align: right;
-        font-size: 13px;
-        font-weight: 400;
-        margin-top: 6px;
-        line-height: 1.7;
     }
 
     .status-good {
@@ -203,10 +198,6 @@ st.markdown(
         text-align: right !important;
     }
 
-    .summary-table tr:nth-child(even) {
-        background-color: #fafafa;
-    }
-
     .recommendation-card {
         direction: rtl !important;
         text-align: right !important;
@@ -219,7 +210,7 @@ st.markdown(
         padding: 18px 20px;
         margin-bottom: 16px;
         box-shadow: 0 6px 18px rgba(15, 23, 42, 0.04);
-        min-height: 170px;
+        min-height: 150px;
     }
 
     .recommendation-title {
@@ -290,17 +281,6 @@ st.markdown(
         color: #111827;
     }
 
-    .stTabs [data-baseweb="tab-list"] {
-        direction: rtl;
-        gap: 4px;
-    }
-
-    .stTabs [data-baseweb="tab"] {
-        font-family: Arial, sans-serif;
-        font-size: 15px;
-        padding: 10px 16px;
-    }
-
     div[data-testid="stDataFrame"] {
         direction: rtl;
     }
@@ -320,7 +300,1501 @@ st.markdown(
 
 
 # ============================================================
-# 2. שמות גיליונות ועמודות
+# פונקציות עזר כלליות
+# ============================================================
+
+def clean_text(value):
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    return str(value).strip()
+
+
+def is_empty_cell(value):
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except Exception:
+        pass
+
+    text = str(value).strip().lower()
+    return text in ["", "none", "nan", "null"]
+
+
+def safe_float(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        if pd.isna(value):
+            return default
+        text = str(value).replace(",", "").replace("₪", "").strip()
+        if text.lower() in ["", "none", "nan", "null"]:
+            return default
+        return float(text)
+    except Exception:
+        return default
+
+
+def safe_percent(value, default=0.0):
+    v = safe_float(value, default)
+    if v > 1:
+        return v / 100
+    return v
+
+
+def format_money(value):
+    return f"₪{safe_float(value):,.0f}"
+
+
+def format_days(value):
+    return f"{safe_float(value):,.1f} ימים"
+
+
+def format_percent(value):
+    return f"{safe_float(value):.1%}"
+
+
+def normalize_series(series):
+    s = pd.to_numeric(series, errors="coerce").fillna(0)
+    min_val = s.min()
+    max_val = s.max()
+
+    if max_val == min_val:
+        return pd.Series(np.ones(len(s)) * 0.5, index=s.index)
+
+    return (s - min_val) / (max_val - min_val)
+
+
+def update_chart_layout(fig):
+    fig.update_layout(
+        template="plotly_white",
+        font=dict(family="Arial", size=13),
+        title_font=dict(size=20),
+        margin=dict(l=30, r=30, t=70, b=40),
+        hovermode="closest"
+    )
+    return fig
+
+
+def display_summary_table(df):
+    html_table = df.to_html(index=False, escape=False)
+    st.markdown(
+        f"""
+        <div class="summary-table" dir="rtl">
+            {html_table}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def render_hero():
+    st.markdown(
+        """
+        <div class="hero-box" dir="rtl">
+            <div class="hero-title" dir="rtl">📊 פלטפורמת החלטות מכרזים ובקרת פרויקטים</div>
+            <div class="hero-subtitle" dir="rtl">
+                מערכת לניתוח כדאיות הגשה למכרזים, בקרת לו״ז, סיכונים, רזרבות,
+                Monte Carlo, מדדי P50/P85/P90 ודשבורד ניהולי לקבלת החלטות.
+            </div>
+            <span class="hero-badge">Tender Go / No-Go</span>
+            <span class="hero-badge">Project Controls</span>
+            <span class="hero-badge">Monte Carlo</span>
+            <span class="hero-badge">Risk Analytics</span>
+            <span class="hero-badge">Financial Reserve</span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def render_kpi_cards(kpi_data, columns=6):
+    cols = st.columns(columns)
+    for col, (label, value, note) in zip(cols, kpi_data):
+        with col:
+            st.markdown(
+                f"""
+                <div class="kpi-card" dir="rtl">
+                    <div class="kpi-label" dir="rtl">{html.escape(str(label))}</div>
+                    <div class="kpi-value" dir="rtl">{html.escape(str(value))}</div>
+                    <div class="kpi-note" dir="rtl">{html.escape(str(note))}</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+
+def render_insights(insights):
+    for i, insight in enumerate(insights, start=1):
+        st.markdown(
+            f"""
+            <div class="insight-box" dir="rtl">
+                <b>{i}.</b> {html.escape(str(insight))}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+
+# ============================================================
+# מודול מכרזים
+# ============================================================
+
+TENDER_BASE_COLUMNS = [
+    "מזהה מכרז",
+    "שם מכרז",
+    "לקוח / מזמין",
+    "תחום",
+    "אומדן הכנסות",
+    "עלות ישירה צפויה",
+    "עלות עקיפה / תקורות",
+    "עלות הכנת הצעה",
+    "עלות אלטרנטיבית",
+    "סיכוי זכייה %",
+    "זמינות צוות",
+    "סיכון חוזי",
+    "חשיבות אסטרטגית",
+    "עמידה בתנאי סף",
+    "הערות"
+]
+
+
+def default_tender_df():
+    return pd.DataFrame(
+        [
+            {
+                "מזהה מכרז": "T1",
+                "שם מכרז": "",
+                "לקוח / מזמין": "",
+                "תחום": "ניהול פרויקט",
+                "אומדן הכנסות": 0,
+                "עלות ישירה צפויה": 0,
+                "עלות עקיפה / תקורות": 0,
+                "עלות הכנת הצעה": 0,
+                "עלות אלטרנטיבית": 0,
+                "סיכוי זכייה %": 30,
+                "זמינות צוות": "בינונית",
+                "סיכון חוזי": "בינוני",
+                "חשיבות אסטרטגית": "בינונית",
+                "עמידה בתנאי סף": "כן",
+                "הערות": ""
+            }
+        ]
+    )
+
+
+def default_risk_df():
+    return pd.DataFrame(
+        columns=[
+            "מזהה מכרז",
+            "תיאור סיכון",
+            "קטגוריה",
+            "הסתברות %",
+            "השפעה כספית",
+            "עלות טיפול",
+            "פעיל?"
+        ]
+    )
+
+
+def default_capacity_df():
+    return pd.DataFrame(
+        columns=[
+            "מזהה מכרז",
+            "תפקיד",
+            "שעות נדרשות",
+            "שעות זמינות",
+            "עומס קיים בשעות"
+        ]
+    )
+
+
+def default_cash_df():
+    return pd.DataFrame(
+        columns=[
+            "מזהה מכרז",
+            "תקופה",
+            "תקבולים צפויים",
+            "תשלומים צפויים"
+        ]
+    )
+
+
+def default_contract_df():
+    return pd.DataFrame(
+        columns=[
+            "מזהה מכרז",
+            "סעיף חוזי",
+            "ציון סיכון לפני טיפול 1-5",
+            "אפקטיביות טיפול %",
+            "משקל"
+        ]
+    )
+
+
+def default_licensing_df():
+    return pd.DataFrame(
+        columns=[
+            "מזהה מכרז",
+            "שלב רישוי",
+            "הסתברות מעבר חודשית %",
+            "עלות עיכוב חודשית"
+        ]
+    )
+
+
+def row_has_real_tender_data(row):
+    tender_id = row.get("מזהה מכרז", None)
+    tender_name = row.get("שם מכרז", None)
+    client = row.get("לקוח / מזמין", None)
+
+    revenue = safe_float(row.get("אומדן הכנסות", 0))
+    direct_cost = safe_float(row.get("עלות ישירה צפויה", 0))
+    indirect_cost = safe_float(row.get("עלות עקיפה / תקורות", 0))
+    bid_cost = safe_float(row.get("עלות הכנת הצעה", 0))
+    opportunity_cost = safe_float(row.get("עלות אלטרנטיבית", 0))
+
+    has_text = not is_empty_cell(tender_id) or not is_empty_cell(tender_name) or not is_empty_cell(client)
+    has_money = any(x > 0 for x in [revenue, direct_cost, indirect_cost, bid_cost, opportunity_cost])
+
+    return has_text or has_money
+
+
+def filter_valid_tender_rows(df):
+    if df is None or df.empty:
+        return pd.DataFrame(columns=TENDER_BASE_COLUMNS)
+
+    clean_df = df.copy()
+
+    for col in TENDER_BASE_COLUMNS:
+        if col not in clean_df.columns:
+            clean_df[col] = ""
+
+    clean_df = clean_df[TENDER_BASE_COLUMNS].copy()
+
+    clean_df = clean_df[clean_df.apply(row_has_real_tender_data, axis=1)].copy()
+
+    if clean_df.empty:
+        return pd.DataFrame(columns=TENDER_BASE_COLUMNS)
+
+    clean_df = clean_df.reset_index(drop=True)
+
+    for idx, row in clean_df.iterrows():
+        if is_empty_cell(row["מזהה מכרז"]):
+            clean_df.at[idx, "מזהה מכרז"] = f"T{idx + 1}"
+
+    clean_df["מזהה מכרז"] = clean_df["מזהה מכרז"].astype(str).str.strip()
+    clean_df = clean_df[
+        ~clean_df["מזהה מכרז"].str.lower().isin(["none", "nan", "null", ""])
+    ].copy()
+
+    return clean_df.reset_index(drop=True)
+
+
+def filter_rows_by_tender_id(df):
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    clean_df = df.copy()
+
+    if "מזהה מכרז" not in clean_df.columns:
+        return pd.DataFrame()
+
+    clean_df = clean_df[~clean_df["מזהה מכרז"].apply(is_empty_cell)].copy()
+
+    if clean_df.empty:
+        return pd.DataFrame(columns=df.columns)
+
+    clean_df["מזהה מכרז"] = clean_df["מזהה מכרז"].astype(str).str.strip()
+    clean_df = clean_df[
+        ~clean_df["מזהה מכרז"].str.lower().isin(["none", "nan", "null", ""])
+    ].copy()
+
+    return clean_df.reset_index(drop=True)
+
+
+def level_to_score(value, high=100, medium=60, low=25, reverse=False):
+    value = clean_text(value)
+
+    if value in ["גבוהה", "גבוה", "High", "high"]:
+        score = high
+    elif value in ["בינונית", "בינוני", "Medium", "medium"]:
+        score = medium
+    elif value in ["נמוכה", "נמוך", "Low", "low"]:
+        score = low
+    else:
+        score = medium
+
+    if reverse:
+        if score == high:
+            return low
+        if score == medium:
+            return medium
+        return high
+
+    return score
+
+
+def validate_tender_input(tender_df):
+    errors = []
+    warnings_list = []
+
+    tender_df = filter_valid_tender_rows(tender_df)
+
+    if tender_df.empty:
+        errors.append("לא הוזן אף מכרז תקין. חובה למלא לפחות שורה אחת.")
+        return errors, warnings_list
+
+    duplicated = tender_df[tender_df["מזהה מכרז"].duplicated()]["מזהה מכרז"].tolist()
+    if duplicated:
+        errors.append("נמצאו מזהי מכרז כפולים: " + ", ".join(duplicated))
+
+    for _, row in tender_df.iterrows():
+        tid = clean_text(row["מזהה מכרז"])
+
+        if is_empty_cell(row["שם מכרז"]):
+            warnings_list.append(f"מכרז {tid}: חסר שם מכרז.")
+
+        revenue = safe_float(row["אומדן הכנסות"])
+        bid_cost = safe_float(row["עלות הכנת הצעה"])
+        win_prob = safe_float(row["סיכוי זכייה %"])
+
+        if revenue < 0:
+            errors.append(f"מכרז {tid}: אומדן הכנסות לא יכול להיות שלילי.")
+
+        if bid_cost < 0:
+            errors.append(f"מכרז {tid}: עלות הכנת הצעה לא יכולה להיות שלילית.")
+
+        if win_prob < 0 or win_prob > 100:
+            errors.append(f"מכרז {tid}: סיכוי זכייה חייב להיות בין 0 ל־100.")
+
+    return errors, warnings_list
+
+
+def calculate_tender_base_results(tender_df):
+    df = filter_valid_tender_rows(tender_df)
+
+    if df.empty:
+        return pd.DataFrame()
+
+    numeric_cols = [
+        "אומדן הכנסות",
+        "עלות ישירה צפויה",
+        "עלות עקיפה / תקורות",
+        "עלות הכנת הצעה",
+        "עלות אלטרנטיבית",
+        "סיכוי זכייה %"
+    ]
+
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    df["סיכוי זכייה"] = df["סיכוי זכייה %"].apply(lambda x: safe_percent(x))
+
+    df["רווח צפוי"] = (
+        df["אומדן הכנסות"]
+        - df["עלות ישירה צפויה"]
+        - df["עלות עקיפה / תקורות"]
+    )
+
+    df["שיעור רווח"] = np.where(
+        df["אומדן הכנסות"] > 0,
+        df["רווח צפוי"] / df["אומדן הכנסות"],
+        0
+    )
+
+    df["ערך צפוי EV"] = (
+        df["סיכוי זכייה"] * df["רווח צפוי"]
+        - df["עלות הכנת הצעה"]
+        - df["עלות אלטרנטיבית"]
+    )
+
+    df["ציון קיבולת"] = df["זמינות צוות"].apply(
+        lambda x: level_to_score(x, high=100, medium=60, low=25)
+    )
+
+    df["ציון סיכון חוזי"] = df["סיכון חוזי"].apply(
+        lambda x: level_to_score(x, high=100, medium=60, low=20, reverse=True)
+    )
+
+    df["ציון אסטרטגי"] = df["חשיבות אסטרטגית"].apply(
+        lambda x: level_to_score(x, high=100, medium=60, low=20)
+    )
+
+    df["ציון EV מנורמל"] = normalize_series(df["ערך צפוי EV"])
+    df["ציון רווחיות"] = np.clip(df["שיעור רווח"] / 0.25, -1, 1)
+    df["ציון רווחיות"] = ((df["ציון רווחיות"] + 1) / 2) * 100
+    df["ציון זכייה"] = df["סיכוי זכייה"] * 100
+
+    df["ציון מכרז משולב"] = (
+        0.35 * (df["ציון EV מנורמל"] * 100)
+        + 0.20 * df["ציון רווחיות"]
+        + 0.20 * df["ציון זכייה"]
+        + 0.10 * df["ציון קיבולת"]
+        + 0.10 * df["ציון סיכון חוזי"]
+        + 0.05 * df["ציון אסטרטגי"]
+    )
+
+    decisions = []
+    reasons = []
+    actions = []
+
+    for _, row in df.iterrows():
+        threshold = clean_text(row["עמידה בתנאי סף"])
+        score = safe_float(row["ציון מכרז משולב"])
+        ev = safe_float(row["ערך צפוי EV"])
+        win_prob = safe_float(row["סיכוי זכייה"])
+        bid_cost = safe_float(row["עלות הכנת הצעה"])
+        capacity = clean_text(row["זמינות צוות"])
+        contract_risk = clean_text(row["סיכון חוזי"])
+
+        decision = "נדרש בירור נוסף"
+        reason = "הציון המשולב נמצא בטווח ביניים."
+        action = "לבצע בדיקת עומק לפני החלטה סופית."
+
+        if threshold == "לא":
+            decision = "לא מומלץ לגשת"
+            reason = "אין עמידה בתנאי סף."
+            action = "לא להתקדם אלא אם ניתן להשלים את תנאי הסף לפני מועד ההגשה."
+
+        elif ev < -abs(bid_cost):
+            decision = "לא מומלץ לגשת"
+            reason = "הערך הצפוי שלילי ביחס לעלות ההצעה."
+            action = "לבחון מחדש מחיר, סיכוי זכייה או סיבה אסטרטגית חריגה."
+
+        elif win_prob < 0.15 and bid_cost > 0:
+            decision = "לא מומלץ לגשת"
+            reason = "סיכוי הזכייה נמוך ועלות הכנת ההצעה קיימת."
+            action = "לא להשקיע בהצעה ללא יתרון תחרותי ברור."
+
+        elif contract_risk in ["גבוהה", "גבוה"]:
+            decision = "נדרש בירור נוסף"
+            reason = "סיכון חוזי גבוה."
+            action = "להעביר לבדיקה משפטית / הנהלה לפני החלטת Go."
+
+        elif capacity in ["נמוכה", "נמוך"]:
+            decision = "נדרש בירור נוסף"
+            reason = "קיבולת צוות נמוכה."
+            action = "לבדוק זמינות משאבים או תגבור לפני הגשה."
+
+        elif score >= 70 and ev > 0:
+            decision = "מומלץ לגשת"
+            reason = "ציון משולב גבוה וערך צפוי חיובי."
+            action = "להתקדם להכנת הצעה ולחדד תמחור וסיכונים."
+
+        elif score < 50:
+            decision = "לא מומלץ לגשת"
+            reason = "ציון מכרז משולב נמוך."
+            action = "לא לגשת בשלב זה, אלא אם קיימת חשיבות אסטרטגית חריגה."
+
+        decisions.append(decision)
+        reasons.append(reason)
+        actions.append(action)
+
+    df["החלטה"] = decisions
+    df["סיבה מרכזית"] = reasons
+    df["פעולה מומלצת"] = actions
+
+    return df
+
+
+def calculate_tender_risks(risk_df):
+    df = filter_rows_by_tender_id(risk_df)
+
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    for col in ["הסתברות %", "השפעה כספית", "עלות טיפול"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    df["פעיל?"] = df["פעיל?"].astype(str).str.strip()
+    df = df[df["פעיל?"] != "לא"].copy()
+
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    df["הסתברות"] = df["הסתברות %"].apply(lambda x: safe_percent(x))
+    df["עלות סיכון צפויה"] = df["הסתברות"] * df["השפעה כספית"] + df["עלות טיפול"]
+
+    summary = (
+        df.groupby("מזהה מכרז", dropna=False)["עלות סיכון צפויה"]
+        .sum()
+        .reset_index()
+        .rename(columns={"עלות סיכון צפויה": "עלות סיכונים צפויה"})
+    )
+
+    return df, summary
+
+
+def calculate_tender_capacity(capacity_df):
+    df = filter_rows_by_tender_id(capacity_df)
+
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    for col in ["שעות נדרשות", "שעות זמינות", "עומס קיים בשעות"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    df["עומס כולל"] = df["שעות נדרשות"] + df["עומס קיים בשעות"]
+
+    df["ניצולת"] = np.where(
+        df["שעות זמינות"] > 0,
+        df["עומס כולל"] / df["שעות זמינות"],
+        0
+    )
+
+    df["סטטוס קיבולת מפורט"] = np.where(
+        df["ניצולת"] > 1,
+        "חריגה מקיבולת",
+        np.where(df["ניצולת"] > 0.8, "עומס גבוה", "תקין")
+    )
+
+    summary = (
+        df.groupby("מזהה מכרז", dropna=False)
+        .agg(
+            שעות_נדרשות=("שעות נדרשות", "sum"),
+            שעות_זמינות=("שעות זמינות", "sum"),
+            עומס_קיים=("עומס קיים בשעות", "sum"),
+            ניצולת_מקסימלית=("ניצולת", "max")
+        )
+        .reset_index()
+    )
+
+    summary["סטטוס קיבולת מפורט"] = np.where(
+        summary["ניצולת_מקסימלית"] > 1,
+        "חריגה מקיבולת",
+        np.where(summary["ניצולת_מקסימלית"] > 0.8, "עומס גבוה", "תקין")
+    )
+
+    return df, summary
+
+
+def calculate_cash_flow(cash_df):
+    df = filter_rows_by_tender_id(cash_df)
+
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    df["תקבולים צפויים"] = pd.to_numeric(df["תקבולים צפויים"], errors="coerce").fillna(0)
+    df["תשלומים צפויים"] = pd.to_numeric(df["תשלומים צפויים"], errors="coerce").fillna(0)
+
+    df["תזרים נקי"] = df["תקבולים צפויים"] - df["תשלומים צפויים"]
+    df = df.sort_values(["מזהה מכרז", "תקופה"]).copy()
+    df["תזרים מצטבר"] = df.groupby("מזהה מכרז")["תזרים נקי"].cumsum()
+
+    summary = (
+        df.groupby("מזהה מכרז", dropna=False)
+        .agg(
+            תזרים_נקי_כולל=("תזרים נקי", "sum"),
+            תזרים_מצטבר_מינימלי=("תזרים מצטבר", "min")
+        )
+        .reset_index()
+    )
+
+    summary["סטטוס תזרים"] = np.where(
+        summary["תזרים_מצטבר_מינימלי"] < 0,
+        "תזרים שלילי בתקופה מסוימת",
+        "תקין"
+    )
+
+    return df, summary
+
+
+def calculate_contract_risk(contract_df):
+    df = filter_rows_by_tender_id(contract_df)
+
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    df["ציון סיכון לפני טיפול 1-5"] = pd.to_numeric(
+        df["ציון סיכון לפני טיפול 1-5"], errors="coerce"
+    ).fillna(3)
+
+    df["אפקטיביות טיפול %"] = pd.to_numeric(
+        df["אפקטיביות טיפול %"], errors="coerce"
+    ).fillna(0)
+
+    df["משקל"] = pd.to_numeric(df["משקל"], errors="coerce").fillna(1)
+
+    df["אפקטיביות טיפול"] = df["אפקטיביות טיפול %"].apply(lambda x: safe_percent(x))
+    df["ציון לאחר טיפול"] = df["ציון סיכון לפני טיפול 1-5"] * (1 - df["אפקטיביות טיפול"])
+    df["ציון משוקלל"] = df["ציון לאחר טיפול"] * df["משקל"]
+
+    summary = (
+        df.groupby("מזהה מכרז", dropna=False)
+        .agg(
+            סכום_ציון_משוקלל=("ציון משוקלל", "sum"),
+            סכום_משקל=("משקל", "sum")
+        )
+        .reset_index()
+    )
+
+    summary["ציון סיכון חוזי מתקדם"] = np.where(
+        summary["סכום_משקל"] > 0,
+        summary["סכום_ציון_משוקלל"] / summary["סכום_משקל"],
+        0
+    )
+
+    summary["סטטוס סיכון חוזי מתקדם"] = np.where(
+        summary["ציון סיכון חוזי מתקדם"] >= 4,
+        "גבוה",
+        np.where(summary["ציון סיכון חוזי מתקדם"] >= 2.5, "בינוני", "נמוך")
+    )
+
+    return df, summary
+
+
+def triangular_sample(min_val, mode_val, max_val, n):
+    min_val = safe_float(min_val)
+    mode_val = safe_float(mode_val)
+    max_val = safe_float(max_val)
+
+    if min_val > mode_val:
+        min_val = mode_val
+
+    if mode_val > max_val:
+        max_val = mode_val
+
+    if min_val == max_val:
+        return np.full(n, min_val)
+
+    return np.random.triangular(min_val, mode_val, max_val, size=n)
+
+
+def run_tender_monte_carlo(tender_results, n_simulations=5000, uncertainty_factor=0.25, random_seed=42):
+    np.random.seed(int(random_seed))
+
+    rows = []
+    simulations = []
+
+    for _, row in tender_results.iterrows():
+        tender_id = row["מזהה מכרז"]
+        tender_name = row["שם מכרז"]
+
+        profit = safe_float(row["רווח צפוי"])
+        win_prob = safe_float(row["סיכוי זכייה"])
+        proposal_cost = safe_float(row["עלות הכנת הצעה"])
+        opportunity_cost = safe_float(row["עלות אלטרנטיבית"])
+        risk_cost = safe_float(row.get("עלות סיכונים צפויה", 0))
+
+        profit_min = profit * (1 - uncertainty_factor)
+        profit_mode = profit
+        profit_max = profit * (1 + uncertainty_factor)
+
+        profit_samples = triangular_sample(profit_min, profit_mode, profit_max, n_simulations)
+        win_samples = np.random.random(n_simulations) < win_prob
+
+        value_samples = (
+            win_samples * profit_samples
+            - proposal_cost
+            - opportunity_cost
+            - risk_cost
+        )
+
+        loss_samples = -value_samples
+
+        var_95 = np.percentile(loss_samples, 95)
+        cvar_95 = loss_samples[loss_samples >= var_95].mean() if np.any(loss_samples >= var_95) else var_95
+
+        rows.append({
+            "מזהה מכרז": tender_id,
+            "שם מכרז": tender_name,
+            "MC ערך ממוצע": np.mean(value_samples),
+            "MC P5": np.percentile(value_samples, 5),
+            "MC P50": np.percentile(value_samples, 50),
+            "MC P95": np.percentile(value_samples, 95),
+            "MC הסתברות הפסד": np.mean(value_samples < 0),
+            "VaR 95": var_95,
+            "CVaR 95": cvar_95
+        })
+
+        simulations.append(
+            pd.DataFrame(
+                {
+                    "מזהה מכרז": tender_id,
+                    "שם מכרז": tender_name,
+                    "ערך סימולציה": value_samples,
+                    "הפסד סימולציה": loss_samples
+                }
+            )
+        )
+
+    summary_df = pd.DataFrame(rows)
+    all_simulations = pd.concat(simulations, ignore_index=True) if simulations else pd.DataFrame()
+
+    return summary_df, all_simulations
+
+
+def calculate_sensitivity(tender_results):
+    rows = []
+
+    for _, row in tender_results.iterrows():
+        tender_id = row["מזהה מכרז"]
+        tender_name = row["שם מכרז"]
+
+        base_profit = safe_float(row["רווח צפוי"])
+        base_prob = safe_float(row["סיכוי זכייה"])
+        proposal_cost = safe_float(row["עלות הכנת הצעה"])
+        opportunity_cost = safe_float(row["עלות אלטרנטיבית"])
+        risk_cost = safe_float(row.get("עלות סיכונים צפויה", 0))
+
+        scenarios = {
+            "בסיס": (base_profit, base_prob),
+            "סיכוי זכייה -20%": (base_profit, max(base_prob * 0.8, 0)),
+            "סיכוי זכייה +20%": (base_profit, min(base_prob * 1.2, 1)),
+            "רווח -20%": (base_profit * 0.8, base_prob),
+            "רווח +20%": (base_profit * 1.2, base_prob),
+        }
+
+        for scenario, (profit, prob) in scenarios.items():
+            ev = prob * profit - proposal_cost - opportunity_cost - risk_cost
+
+            rows.append({
+                "מזהה מכרז": tender_id,
+                "שם מכרז": tender_name,
+                "תרחיש": scenario,
+                "ערך צפוי EV": ev
+            })
+
+    return pd.DataFrame(rows)
+
+
+def optimize_tender_portfolio(tender_results, max_proposal_budget, max_tenders):
+    df = tender_results.copy()
+    df = df[df["החלטה"] != "לא מומלץ לגשת"].copy()
+
+    if df.empty:
+        return pd.DataFrame(), {"message": "אין מכרזים מתאימים לאופטימיזציה."}
+
+    if len(df) > 15:
+        df = df.sort_values("ערך צפוי EV", ascending=False).head(15).copy()
+
+    best_value = -1e18
+    best_combo = []
+
+    records = df.to_dict("records")
+
+    for r in range(1, min(int(max_tenders), len(records)) + 1):
+        for combo in itertools.combinations(records, r):
+            total_cost = sum(safe_float(x["עלות הכנת הצעה"]) for x in combo)
+            total_ev = sum(safe_float(x["ערך צפוי EV"]) for x in combo)
+
+            if total_cost <= max_proposal_budget and total_ev > best_value:
+                best_value = total_ev
+                best_combo = combo
+
+    if not best_combo:
+        return pd.DataFrame(), {"message": "לא נמצא שילוב מכרזים שעומד במגבלות."}
+
+    result_df = pd.DataFrame(best_combo)
+
+    summary = {
+        "מספר מכרזים נבחרים": len(result_df),
+        "עלות הכנת הצעות כוללת": result_df["עלות הכנת הצעה"].sum(),
+        "ערך צפוי כולל": result_df["ערך צפוי EV"].sum(),
+        "רווח צפוי כולל": result_df["רווח צפוי"].sum()
+    }
+
+    return result_df, summary
+
+
+def calculate_markov_licensing(licensing_df):
+    df = filter_rows_by_tender_id(licensing_df)
+
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    df["הסתברות מעבר חודשית %"] = pd.to_numeric(
+        df["הסתברות מעבר חודשית %"], errors="coerce"
+    ).fillna(50)
+
+    df["עלות עיכוב חודשית"] = pd.to_numeric(
+        df["עלות עיכוב חודשית"], errors="coerce"
+    ).fillna(0)
+
+    df["הסתברות מעבר"] = df["הסתברות מעבר חודשית %"].apply(lambda x: max(safe_percent(x), 0.01))
+
+    df["משך צפוי בחודשים"] = 1 / df["הסתברות מעבר"]
+    df["עלות עיכוב צפויה"] = df["משך צפוי בחודשים"] * df["עלות עיכוב חודשית"]
+
+    summary = (
+        df.groupby("מזהה מכרז", dropna=False)
+        .agg(
+            משך_רישוי_צפוי=("משך צפוי בחודשים", "sum"),
+            עלות_עיכוב_רישוי_צפויה=("עלות עיכוב צפויה", "sum")
+        )
+        .reset_index()
+    )
+
+    return df, summary
+
+
+def build_tender_results_excel(output):
+    buffer = BytesIO()
+
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        output["tender_results"].to_excel(writer, sheet_name="תוצאות מכרזים", index=False)
+
+        if not output.get("risk_detail", pd.DataFrame()).empty:
+            output["risk_detail"].to_excel(writer, sheet_name="סיכונים", index=False)
+
+        if not output.get("capacity_detail", pd.DataFrame()).empty:
+            output["capacity_detail"].to_excel(writer, sheet_name="קיבולת", index=False)
+
+        if not output.get("cash_detail", pd.DataFrame()).empty:
+            output["cash_detail"].to_excel(writer, sheet_name="תזרים", index=False)
+
+        if not output.get("contract_detail", pd.DataFrame()).empty:
+            output["contract_detail"].to_excel(writer, sheet_name="סיכון חוזי", index=False)
+
+        if not output.get("licensing_detail", pd.DataFrame()).empty:
+            output["licensing_detail"].to_excel(writer, sheet_name="רישוי Markov", index=False)
+
+        if not output.get("mc_summary", pd.DataFrame()).empty:
+            output["mc_summary"].to_excel(writer, sheet_name="Monte Carlo", index=False)
+
+        if not output.get("sensitivity", pd.DataFrame()).empty:
+            output["sensitivity"].to_excel(writer, sheet_name="רגישות", index=False)
+
+        if not output.get("portfolio_selected", pd.DataFrame()).empty:
+            output["portfolio_selected"].to_excel(writer, sheet_name="פורטפוליו נבחר", index=False)
+
+        pd.DataFrame({"תובנות": output.get("insights", [])}).to_excel(writer, sheet_name="תובנות", index=False)
+
+    buffer.seek(0)
+    return buffer
+
+
+def render_tender_cards(results):
+    total = len(results)
+    go_count = (results["החלטה"] == "מומלץ לגשת").sum()
+    no_go_count = (results["החלטה"] == "לא מומלץ לגשת").sum()
+    review_count = (results["החלטה"] == "נדרש בירור נוסף").sum()
+
+    total_ev = results["ערך צפוי EV"].sum()
+    total_profit = results["רווח צפוי"].sum()
+
+    best_row = results.sort_values("ציון מכרז משולב", ascending=False).iloc[0]
+    best_name = clean_text(best_row["שם מכרז"]) or clean_text(best_row["מזהה מכרז"])
+
+    kpi_data = [
+        ("מכרזים שנבדקו", f"{total}", "מספר שורות תקינות"),
+        ("מומלץ לגשת", f"{go_count}", "Go"),
+        ("לא מומלץ", f"{no_go_count}", "No-Go"),
+        ("דורש בירור", f"{review_count}", "Conditional"),
+        ("ערך צפוי כולל", format_money(total_ev), "EV כולל"),
+        ("המכרז המוביל", str(best_name), f"ציון {best_row['ציון מכרז משולב']:.1f}")
+    ]
+
+    render_kpi_cards(kpi_data, columns=6)
+
+
+def create_tender_charts(results, mc_summary=None, sensitivity=None):
+    figs = {}
+
+    decision_counts = results["החלטה"].value_counts().reset_index()
+    decision_counts.columns = ["החלטה", "מספר מכרזים"]
+
+    figs["התפלגות החלטות"] = update_chart_layout(
+        px.bar(
+            decision_counts,
+            x="החלטה",
+            y="מספר מכרזים",
+            title="התפלגות החלטות Go / No-Go",
+            text="מספר מכרזים"
+        )
+    )
+
+    top = results.sort_values("ציון מכרז משולב", ascending=False).copy()
+
+    figs["ציון מכרז משולב"] = update_chart_layout(
+        px.bar(
+            top,
+            x="ציון מכרז משולב",
+            y="שם מכרז",
+            orientation="h",
+            title="ציון מכרז משולב לפי מכרז",
+            hover_data=["מזהה מכרז", "החלטה", "ערך צפוי EV"]
+        ).update_layout(yaxis={"categoryorder": "total ascending"})
+    )
+
+    figs["ערך צפוי"] = update_chart_layout(
+        px.bar(
+            top,
+            x="ערך צפוי EV",
+            y="שם מכרז",
+            orientation="h",
+            title="ערך צפוי EV לפי מכרז",
+            hover_data=["מזהה מכרז", "סיכוי זכייה", "רווח צפוי"]
+        ).update_layout(yaxis={"categoryorder": "total ascending"})
+    )
+
+    figs["רווח צפוי"] = update_chart_layout(
+        px.bar(
+            top,
+            x="רווח צפוי",
+            y="שם מכרז",
+            orientation="h",
+            title="רווח צפוי לפי מכרז",
+            hover_data=["מזהה מכרז", "שיעור רווח"]
+        ).update_layout(yaxis={"categoryorder": "total ascending"})
+    )
+
+    figs["עלות הצעה מול EV"] = update_chart_layout(
+        px.scatter(
+            results,
+            x="עלות הכנת הצעה",
+            y="ערך צפוי EV",
+            size=np.maximum(results["אומדן הכנסות"], 1),
+            hover_name="שם מכרז",
+            color="החלטה",
+            title="עלות הכנת הצעה מול ערך צפוי"
+        )
+    )
+
+    if mc_summary is not None and not mc_summary.empty:
+        figs["Monte Carlo - הסתברות הפסד"] = update_chart_layout(
+            px.bar(
+                mc_summary.sort_values("MC הסתברות הפסד", ascending=False),
+                x="MC הסתברות הפסד",
+                y="שם מכרז",
+                orientation="h",
+                title="הסתברות הפסד לפי סימולציית Monte Carlo"
+            ).update_layout(xaxis_tickformat=".0%", yaxis={"categoryorder": "total ascending"})
+        )
+
+    if sensitivity is not None and not sensitivity.empty:
+        figs["ניתוח רגישות"] = update_chart_layout(
+            px.line(
+                sensitivity,
+                x="תרחיש",
+                y="ערך צפוי EV",
+                color="שם מכרז",
+                title="ניתוח רגישות לערך צפוי לפי מכרז",
+                markers=True
+            )
+        )
+
+    return figs
+
+
+def tender_card_html(row):
+    decision = clean_text(row["החלטה"])
+
+    if decision == "מומלץ לגשת":
+        badge_class = "risk-low"
+    elif decision == "נדרש בירור נוסף":
+        badge_class = "risk-medium"
+    else:
+        badge_class = "risk-high"
+
+    name = clean_text(row["שם מכרז"]) or clean_text(row["מזהה מכרז"])
+
+    return f"""
+    <div class="recommendation-card" dir="rtl">
+        <div class="recommendation-title" dir="rtl">
+            {html.escape(name)}
+        </div>
+        <div class="recommendation-meta" dir="rtl">
+            מזהה: {html.escape(str(row["מזהה מכרז"]))} |
+            לקוח: {html.escape(str(row["לקוח / מזמין"]))} |
+            החלטה:
+            <span class="risk-badge {badge_class}">{html.escape(decision)}</span> |
+            ציון: {safe_float(row["ציון מכרז משולב"]):.1f}
+        </div>
+        <div class="recommendation-action" dir="rtl">
+            <b>ערך צפוי:</b> {format_money(row["ערך צפוי EV"])} |
+            <b>רווח צפוי:</b> {format_money(row["רווח צפוי"])} |
+            <b>סיכוי זכייה:</b> {format_percent(row["סיכוי זכייה"])}<br>
+            <b>סיבה מרכזית:</b> {html.escape(str(row["סיבה מרכזית"]))}<br>
+            <b>פעולה מומלצת:</b> {html.escape(str(row["פעולה מומלצת"]))}
+        </div>
+    </div>
+    """
+
+
+def render_tender_decision_cards(results, max_cards=6):
+    top = results.sort_values("ציון מכרז משולב", ascending=False).head(max_cards).reset_index(drop=True)
+
+    for i in range(0, len(top), 2):
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown(tender_card_html(top.iloc[i]), unsafe_allow_html=True)
+
+        if i + 1 < len(top):
+            with col2:
+                st.markdown(tender_card_html(top.iloc[i + 1]), unsafe_allow_html=True)
+
+
+def render_tender_module():
+    st.header("בדיקת כדאיות הגשה למכרזים")
+    st.write(
+        "במסלול זה ממלאים מכרזים ישירות באתר, בוחרים אילו בדיקות להפעיל, "
+        "והמערכת מחשבת החלטות Go / No-Go, ערך צפוי, רווחיות, סיכונים, קיבולת, תזרים ומדדי סיכון מתקדמים."
+    )
+
+    if "tender_input_df" not in st.session_state:
+        st.session_state["tender_input_df"] = default_tender_df()
+
+    if "risk_input_df" not in st.session_state:
+        st.session_state["risk_input_df"] = default_risk_df()
+
+    if "capacity_input_df" not in st.session_state:
+        st.session_state["capacity_input_df"] = default_capacity_df()
+
+    if "cash_input_df" not in st.session_state:
+        st.session_state["cash_input_df"] = default_cash_df()
+
+    if "contract_input_df" not in st.session_state:
+        st.session_state["contract_input_df"] = default_contract_df()
+
+    if "licensing_input_df" not in st.session_state:
+        st.session_state["licensing_input_df"] = default_licensing_df()
+
+    st.info(
+        "חשוב: מלא את הנתונים בתוך הטבלה ואז לחץ על כפתור החישוב. "
+        "הערכים נשמרים רק לאחר לחיצה על כפתור החישוב, כדי למנוע מחיקה בזמן ההקלדה."
+    )
+
+    with st.form("tender_main_form", clear_on_submit=False):
+        st.subheader("שלב 1 — מילוי מכרזים")
+
+        tender_df = st.data_editor(
+            st.session_state["tender_input_df"],
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            key="tender_input_editor",
+            column_config={
+                "תחום": st.column_config.SelectboxColumn(
+                    "תחום",
+                    options=["ניהול פרויקט", "ניהול תכנון", "פיקוח", "PMO", "בינוי", "תשתיות", "ייעוץ", "אחר"]
+                ),
+                "זמינות צוות": st.column_config.SelectboxColumn(
+                    "זמינות צוות",
+                    options=["גבוהה", "בינונית", "נמוכה"]
+                ),
+                "סיכון חוזי": st.column_config.SelectboxColumn(
+                    "סיכון חוזי",
+                    options=["נמוך", "בינוני", "גבוה"]
+                ),
+                "חשיבות אסטרטגית": st.column_config.SelectboxColumn(
+                    "חשיבות אסטרטגית",
+                    options=["גבוהה", "בינונית", "נמוכה"]
+                ),
+                "עמידה בתנאי סף": st.column_config.SelectboxColumn(
+                    "עמידה בתנאי סף",
+                    options=["כן", "לא"]
+                ),
+                "סיכוי זכייה %": st.column_config.NumberColumn("סיכוי זכייה %", min_value=0, max_value=100, step=1),
+                "אומדן הכנסות": st.column_config.NumberColumn("אומדן הכנסות", min_value=0, step=1000),
+                "עלות ישירה צפויה": st.column_config.NumberColumn("עלות ישירה צפויה", min_value=0, step=1000),
+                "עלות עקיפה / תקורות": st.column_config.NumberColumn("עלות עקיפה / תקורות", min_value=0, step=1000),
+                "עלות הכנת הצעה": st.column_config.NumberColumn("עלות הכנת הצעה", min_value=0, step=500),
+                "עלות אלטרנטיבית": st.column_config.NumberColumn("עלות אלטרנטיבית", min_value=0, step=500),
+            }
+        )
+
+        st.subheader("שלב 2 — בחירת בדיקות להפעלה")
+
+        c1, c2, c3 = st.columns(3)
+
+        with c1:
+            st.checkbox("בדיקת Go / No-Go בסיסית", value=True, disabled=True)
+            st.checkbox("בדיקת רווחיות ותמחור", value=True, disabled=True)
+            st.checkbox("בדיקת ערך צפוי Expected Value", value=True, disabled=True)
+            check_risks = st.checkbox("בדיקת סיכונים", value=True)
+
+        with c2:
+            check_capacity = st.checkbox("בדיקת קיבולת צוות", value=True)
+            check_cashflow = st.checkbox("בדיקת תזרים", value=False)
+            check_contract = st.checkbox("בדיקת סיכון חוזי מתקדם", value=True)
+            check_mc = st.checkbox("סימולציית Monte Carlo למכרזים", value=True)
+
+        with c3:
+            check_var = st.checkbox("VaR / CVaR / CFaR", value=True)
+            check_sensitivity = st.checkbox("ניתוח רגישות", value=True)
+            check_portfolio = st.checkbox("אופטימיזציית פורטפוליו מכרזים", value=False)
+            check_markov = st.checkbox("מודל רישוי / Markov", value=False)
+
+        st.subheader("שלב 3 — נתונים משלימים לבדיקות מתקדמות")
+
+        with st.expander("נתוני סיכונים"):
+            st.caption("כל שורה היא סיכון הקשור למכרז מסוים. אם אין סיכונים, אפשר להשאיר ריק.")
+            risk_df = st.data_editor(
+                st.session_state["risk_input_df"],
+                num_rows="dynamic",
+                use_container_width=True,
+                hide_index=True,
+                key="tender_risk_editor",
+                column_config={
+                    "פעיל?": st.column_config.SelectboxColumn("פעיל?", options=["כן", "לא"]),
+                    "הסתברות %": st.column_config.NumberColumn("הסתברות %", min_value=0, max_value=100, step=1),
+                    "השפעה כספית": st.column_config.NumberColumn("השפעה כספית", min_value=0, step=1000),
+                    "עלות טיפול": st.column_config.NumberColumn("עלות טיפול", min_value=0, step=500),
+                }
+            )
+
+        with st.expander("נתוני קיבולת צוות"):
+            st.caption("בדיקה זו בודקת האם המכרזים יוצרים עומס יתר על בעלי תפקידים.")
+            capacity_df = st.data_editor(
+                st.session_state["capacity_input_df"],
+                num_rows="dynamic",
+                use_container_width=True,
+                hide_index=True,
+                key="tender_capacity_editor",
+                column_config={
+                    "תפקיד": st.column_config.SelectboxColumn(
+                        "תפקיד",
+                        options=["מנהל פרויקט", "מנהל תכנון", "מפקח", "כלכלן", "יועץ משפטי", "אחר"]
+                    ),
+                    "שעות נדרשות": st.column_config.NumberColumn("שעות נדרשות", min_value=0, step=1),
+                    "שעות זמינות": st.column_config.NumberColumn("שעות זמינות", min_value=0, step=1),
+                    "עומס קיים בשעות": st.column_config.NumberColumn("עומס קיים בשעות", min_value=0, step=1),
+                }
+            )
+
+        with st.expander("נתוני תזרים"):
+            st.caption("בדיקה זו מזהה תזרים שלילי בתקופות שונות.")
+            cash_df = st.data_editor(
+                st.session_state["cash_input_df"],
+                num_rows="dynamic",
+                use_container_width=True,
+                hide_index=True,
+                key="tender_cash_editor",
+                column_config={
+                    "תקבולים צפויים": st.column_config.NumberColumn("תקבולים צפויים", min_value=0, step=1000),
+                    "תשלומים צפויים": st.column_config.NumberColumn("תשלומים צפויים", min_value=0, step=1000),
+                }
+            )
+
+        with st.expander("נתוני סיכון חוזי מתקדם"):
+            st.caption("הציון הוא 1-5. ככל שהציון גבוה יותר, הסיכון גבוה יותר.")
+            contract_df = st.data_editor(
+                st.session_state["contract_input_df"],
+                num_rows="dynamic",
+                use_container_width=True,
+                hide_index=True,
+                key="tender_contract_editor",
+                column_config={
+                    "ציון סיכון לפני טיפול 1-5": st.column_config.NumberColumn(
+                        "ציון סיכון לפני טיפול 1-5",
+                        min_value=1,
+                        max_value=5,
+                        step=1
+                    ),
+                    "אפקטיביות טיפול %": st.column_config.NumberColumn(
+                        "אפקטיביות טיפול %",
+                        min_value=0,
+                        max_value=100,
+                        step=1
+                    ),
+                    "משקל": st.column_config.NumberColumn("משקל", min_value=0, step=1),
+                }
+            )
+
+        with st.expander("נתוני רישוי / Markov"):
+            st.caption("בדיקה זו מעריכה משך ועלות עיכוב בשלבי רישוי או אישור.")
+            licensing_df = st.data_editor(
+                st.session_state["licensing_input_df"],
+                num_rows="dynamic",
+                use_container_width=True,
+                hide_index=True,
+                key="tender_markov_editor",
+                column_config={
+                    "הסתברות מעבר חודשית %": st.column_config.NumberColumn(
+                        "הסתברות מעבר חודשית %",
+                        min_value=1,
+                        max_value=100,
+                        step=1
+                    ),
+                    "עלות עיכוב חודשית": st.column_config.NumberColumn(
+                        "עלות עיכוב חודשית",
+                        min_value=0,
+                        step=1000
+                    ),
+                }
+            )
+
+        st.subheader("שלב 4 — הגדרות מתקדמות")
+
+        c4, c5, c6, c7 = st.columns(4)
+
+        with c4:
+            n_simulations = st.number_input(
+                "מספר סימולציות Monte Carlo",
+                min_value=1000,
+                max_value=50000,
+                value=5000,
+                step=1000
+            )
+
+        with c5:
+            uncertainty_factor = st.slider(
+                "רמת אי־ודאות ברווח",
+                min_value=0.05,
+                max_value=0.75,
+                value=0.25,
+                step=0.05
+            )
+
+        with c6:
+            random_seed = st.number_input(
+                "Seed אקראיות",
+                min_value=1,
+                value=42,
+                step=1
+            )
+
+        with c7:
+            max_tenders = st.number_input(
+                "מספר מכרזים מקסימלי בפורטפוליו",
+                min_value=1,
+                value=3,
+                step=1
+            )
+
+        max_proposal_budget = st.number_input(
+            "מגבלת תקציב להכנת הצעות עבור אופטימיזציית פורטפוליו",
+            min_value=0,
+            value=50000,
+            step=5000
+        )
+
+        run_tender = st.form_submit_button(
+            "חשב כדאיות מכרזים",
+            use_container_width=True
+        )
+
+    if not run_tender:
+        st.info("מלא את הנתונים בטבלה ולחץ על 'חשב כדאיות מכרזים'.")
+        return
+
+    st.session_state["tender_input_df"] = tender_df
+    st.session_state["risk_input_df"] = risk_df
+    st.session_state["capacity_input_df"] = capacity_df
+    st.session_state["cash_input_df"] = cash_df
+    st.session_state["contract_input_df"] = contract_df
+    st.session_state["licensing_input_df"] = licensing_df
+
+    errors, warnings_list = validate_tender_input(tender_df)
+
+    if errors:
+        st.error("נמצאו בעיות שמונעות חישוב.")
+        for error in errors:
+            st.write(f"- {error}")
+        return
+
+    if warnings_list:
+        st.warning("נמצאו אזהרות בקלט. החישוב יבוצע, אך כדאי לבדוק:")
+        for warning in warnings_list:
+            st.write(f"- {warning}")
+
+    tender_results = calculate_tender_base_results(tender_df)
+
+    if tender_results.empty:
+        st.error("לא נמצאו מכרזים תקינים לחישוב.")
+        return
+
+    risk_detail = pd.DataFrame()
+    risk_summary = pd.DataFrame()
+    capacity_detail = pd.DataFrame()
+    capacity_summary = pd.DataFrame()
+    cash_detail = pd.DataFrame()
+    cash_summary = pd.DataFrame()
+    contract_detail = pd.DataFrame()
+    contract_summary = pd.DataFrame()
+    licensing_detail = pd.DataFrame()
+    licensing_summary = pd.DataFrame()
+    mc_summary = pd.DataFrame()
+    mc_sims = pd.DataFrame()
+    sensitivity = pd.DataFrame()
+    portfolio_selected = pd.DataFrame()
+    portfolio_summary = {}
+
+    if check_risks:
+        risk_detail, risk_summary = calculate_tender_risks(risk_df)
+        if not risk_summary.empty:
+            tender_results = tender_results.merge(risk_summary, on="מזהה מכרז", how="left")
+            tender_results["עלות סיכונים צפויה"] = tender_results["עלות סיכונים צפויה"].fillna(0)
+            tender_results["ערך צפוי EV"] = tender_results["ערך צפוי EV"] - tender_results["עלות סיכונים צפויה"]
+        else:
+            tender_results["עלות סיכונים צפויה"] = 0
+
+    if check_capacity:
+        capacity_detail, capacity_summary = calculate_tender_capacity(capacity_df)
+        if not capacity_summary.empty:
+            tender_results = tender_results.merge(capacity_summary, on="מזהה מכרז", how="left")
+
+    if check_cashflow:
+        cash_detail, cash_summary = calculate_cash_flow(cash_df)
+        if not cash_summary.empty:
+            tender_results = tender_results.merge(cash_summary, on="מזהה מכרז", how="left")
+
+    if check_contract:
+        contract_detail, contract_summary = calculate_contract_risk(contract_df)
+        if not contract_summary.empty:
+            tender_results = tender_results.merge(contract_summary, on="מזהה מכרז", how="left")
+
+    if check_markov:
+        licensing_detail, licensing_summary = calculate_markov_licensing(licensing_df)
+        if not licensing_summary.empty:
+            tender_results = tender_results.merge(licensing_summary, on="מזהה מכרז", how="left")
+
+    if check_mc or check_var:
+        mc_summary, mc_sims = run_tender_monte_carlo(
+            tender_results=tender_results,
+            n_simulations=int(n_simulations),
+            uncertainty_factor=float(uncertainty_factor),
+            random_seed=int(random_seed)
+        )
+        if not mc_summary.empty:
+            tender_results = tender_results.merge(mc_summary, on=["מזהה מכרז", "שם מכרז"], how="left")
+
+    if check_sensitivity:
+        sensitivity = calculate_sensitivity(tender_results)
+
+    if check_portfolio:
+        portfolio_selected, portfolio_summary = optimize_tender_portfolio(
+            tender_results=tender_results,
+            max_proposal_budget=max_proposal_budget,
+            max_tenders=int(max_tenders)
+        )
+
+    insights = [
+        f"נבדקו {len(tender_results)} מכרזים תקינים.",
+        f"מספר מכרזים שמומלץ לגשת אליהם: {(tender_results['החלטה'] == 'מומלץ לגשת').sum()}.",
+        f"מספר מכרזים שלא מומלץ לגשת אליהם: {(tender_results['החלטה'] == 'לא מומלץ לגשת').sum()}.",
+        f"מספר מכרזים שדורשים בירור נוסף: {(tender_results['החלטה'] == 'נדרש בירור נוסף').sum()}.",
+        f"הערך הצפוי הכולל של המכרזים הוא {format_money(tender_results['ערך צפוי EV'].sum())}.",
+        f"עלות הכנת ההצעות הכוללת היא {format_money(tender_results['עלות הכנת הצעה'].sum())}."
+    ]
+
+    best_row = tender_results.sort_values("ציון מכרז משולב", ascending=False).iloc[0]
+    insights.append(
+        f"המכרז בעל הציון המשולב הגבוה ביותר הוא '{clean_text(best_row['שם מכרז']) or clean_text(best_row['מזהה מכרז'])}' "
+        f"עם ציון {best_row['ציון מכרז משולב']:.1f}."
+    )
+
+    output = {
+        "tender_results": tender_results,
+        "risk_detail": risk_detail,
+        "capacity_detail": capacity_detail,
+        "cash_detail": cash_detail,
+        "contract_detail": contract_detail,
+        "licensing_detail": licensing_detail,
+        "mc_summary": mc_summary,
+        "sensitivity": sensitivity,
+        "portfolio_selected": portfolio_selected,
+        "portfolio_summary": portfolio_summary,
+        "insights": insights
+    }
+
+    st.success("חישוב המכרזים הסתיים בהצלחה.")
+
+    render_tender_cards(tender_results)
+
+    tabs = st.tabs([
+        "סיכום מכרזים",
+        "גרפים",
+        "טבלת תוצאות",
+        "בדיקות מתקדמות",
+        "הורדת דוח"
+    ])
+
+    with tabs[0]:
+        st.subheader("תובנות ניהוליות")
+        render_insights(insights)
+
+        st.subheader("כרטיסי החלטה למכרזים")
+        render_tender_decision_cards(tender_results, max_cards=6)
+
+    with tabs[1]:
+        figs = create_tender_charts(tender_results, mc_summary=mc_summary, sensitivity=sensitivity)
+
+        col1, col2 = st.columns(2)
+
+        for i, (title, fig) in enumerate(figs.items()):
+            if i % 2 == 0:
+                with col1:
+                    st.markdown(f"### {title}")
+                    st.plotly_chart(fig, use_container_width=True)
+            else:
+                with col2:
+                    st.markdown(f"### {title}")
+                    st.plotly_chart(fig, use_container_width=True)
+
+    with tabs[2]:
+        st.subheader("טבלת תוצאות מכרזים")
+        st.dataframe(tender_results, use_container_width=True, hide_index=True)
+
+    with tabs[3]:
+        if not risk_detail.empty:
+            st.markdown("### סיכונים")
+            st.dataframe(risk_detail, use_container_width=True, hide_index=True)
+
+        if not capacity_detail.empty:
+            st.markdown("### קיבולת צוות")
+            st.dataframe(capacity_detail, use_container_width=True, hide_index=True)
+
+        if not cash_detail.empty:
+            st.markdown("### תזרים")
+            st.dataframe(cash_detail, use_container_width=True, hide_index=True)
+
+        if not contract_detail.empty:
+            st.markdown("### סיכון חוזי")
+            st.dataframe(contract_detail, use_container_width=True, hide_index=True)
+
+        if not licensing_detail.empty:
+            st.markdown("### רישוי / Markov")
+            st.dataframe(licensing_detail, use_container_width=True, hide_index=True)
+
+        if not mc_summary.empty:
+            st.markdown("### Monte Carlo / VaR / CVaR")
+            st.dataframe(mc_summary, use_container_width=True, hide_index=True)
+
+        if not sensitivity.empty:
+            st.markdown("### ניתוח רגישות")
+            st.dataframe(sensitivity, use_container_width=True, hide_index=True)
+
+        if not portfolio_selected.empty:
+            st.markdown("### פורטפוליו מכרזים מומלץ")
+            st.dataframe(portfolio_selected, use_container_width=True, hide_index=True)
+            st.json(portfolio_summary)
+
+        if (
+            risk_detail.empty
+            and capacity_detail.empty
+            and cash_detail.empty
+            and contract_detail.empty
+            and licensing_detail.empty
+            and mc_summary.empty
+            and sensitivity.empty
+            and portfolio_selected.empty
+        ):
+            st.info("לא הוזנו נתונים מתקדמים או שלא הופעלו בדיקות מתקדמות.")
+
+    with tabs[4]:
+        excel_buffer = build_tender_results_excel(output)
+
+        st.download_button(
+            label="הורד דוח בדיקת מכרזים Excel",
+            data=excel_buffer,
+            file_name="תוצאות_בדיקת_מכרזים.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+
+
+# ============================================================
+# מודול בקרת פרויקט
 # ============================================================
 
 SHEET_TASKS = "משימות"
@@ -387,64 +1861,6 @@ REQUIRED_SHEETS = [
 ]
 
 
-# ============================================================
-# 3. פונקציות עזר
-# ============================================================
-
-def format_money(value):
-    return f"₪{value:,.0f}"
-
-
-def format_days(value):
-    return f"{value:,.1f} ימים"
-
-
-def format_percent(value):
-    return f"{value:.1%}"
-
-
-def normalize_series(series):
-    s = pd.to_numeric(series, errors="coerce").fillna(0)
-    min_val = s.min()
-    max_val = s.max()
-
-    if max_val == min_val:
-        return s * 0
-
-    return (s - min_val) / (max_val - min_val)
-
-
-def display_summary_table(df):
-    html = df.to_html(index=False, escape=False)
-    st.markdown(
-        f"""
-        <div class="summary-table" dir="rtl">
-            {html}
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-
-def risk_level_text(prob_delay):
-    if prob_delay >= 0.70:
-        return "קריטי", "status-critical"
-    if prob_delay >= 0.40:
-        return "גבוה", "status-high"
-    if prob_delay >= 0.20:
-        return "בינוני", "status-medium"
-    return "נמוך", "status-good"
-
-
-def risk_badge_class(risk_level):
-    risk_level = str(risk_level)
-    if "גבוה" in risk_level:
-        return "risk-high"
-    if "בינ" in risk_level:
-        return "risk-medium"
-    return "risk-low"
-
-
 def read_sheet_hebrew(file_path, sheet_name, columns_map):
     df_original = pd.read_excel(file_path, sheet_name=sheet_name)
     df_original.columns = df_original.columns.astype(str).str.strip()
@@ -489,10 +1905,6 @@ def load_all_inputs(file_path):
         "scenarios": scenarios
     }
 
-
-# ============================================================
-# 4. בדיקות תקינות
-# ============================================================
 
 def validate_tasks(tasks):
     df = tasks.copy()
@@ -543,6 +1955,9 @@ def validate_tasks(tasks):
 def validate_links(links, tasks):
     df = links.copy()
 
+    if df.empty:
+        return df
+
     df["predecessor_id"] = df["predecessor_id"].astype(str).str.strip()
     df["successor_id"] = df["successor_id"].astype(str).str.strip()
     df["relationship_type"] = df["relationship_type"].astype(str).str.strip().str.upper()
@@ -576,12 +1991,14 @@ def validate_links(links, tasks):
 def validate_risks(risks, tasks):
     df = risks.copy()
 
+    if df.empty:
+        return df
+
     df["risk_id"] = df["risk_id"].astype(str).str.strip()
     df["related_task_id"] = df["related_task_id"].astype(str).str.strip()
     df["is_active"] = df["is_active"].astype(str).str.strip()
 
     task_ids = set(tasks["task_id"])
-
     missing_related_tasks = df[~df["related_task_id"].isin(task_ids)]["related_task_id"].tolist()
 
     if missing_related_tasks:
@@ -662,10 +2079,6 @@ def choose_scenario(scenarios, scenario_name="בסיס"):
     }
 
 
-# ============================================================
-# 5. גרף קשרים וסימולציה
-# ============================================================
-
 def build_graph(tasks, links):
     task_ids = tasks["task_id"].tolist()
 
@@ -694,7 +2107,6 @@ def build_graph(tasks, links):
 
 def topological_sort(task_ids, predecessors, successors):
     in_degree = {task_id: len(predecessors[task_id]) for task_id in task_ids}
-
     queue = deque([task_id for task_id in task_ids if in_degree[task_id] == 0])
     order = []
 
@@ -758,7 +2170,7 @@ def run_monte_carlo(tasks, links, risks, n_simulations=10000, random_seed=42):
     risk_cost_samples = np.zeros(n_simulations)
     risk_delay_by_task = {task_id: np.zeros(n_simulations) for task_id in task_ids}
 
-    active_risks = risks[risks["is_active"] == "כן"].copy()
+    active_risks = risks[risks["is_active"] == "כן"].copy() if not risks.empty else pd.DataFrame()
 
     for _, risk in active_risks.iterrows():
         related_task = risk["related_task_id"]
@@ -857,10 +2269,6 @@ def run_monte_carlo(tasks, links, risks, n_simulations=10000, random_seed=42):
         "links_by_successor": links_by_successor
     }
 
-
-# ============================================================
-# 6. חישובי סיכום
-# ============================================================
 
 def calculate_schedule_summary(results, target_duration):
     durations = results["project_durations"]
@@ -1001,10 +2409,6 @@ def build_task_risk_table(tasks, results):
     return table
 
 
-# ============================================================
-# 7. המלצות פעולה
-# ============================================================
-
 def identify_main_risk_reason(row):
     components = {
         "קריטיות גבוהה בנתיב הפרויקט": row["נרמול קריטיות"],
@@ -1100,22 +2504,6 @@ def create_management_insights(schedule_summary, financial_summary, task_risk_ta
     insights.append(f"הפעולה המומלצת הראשונה היא עבור '{top_recommendation['שם פעילות']}': {top_recommendation['פעולה מומלצת']}")
 
     return insights
-
-
-# ============================================================
-# 8. גרפים
-# ============================================================
-
-def update_chart_layout(fig):
-    fig.update_layout(
-        template="plotly_white",
-        font=dict(family="Arial", size=13),
-        title_font=dict(size=20),
-        margin=dict(l=30, r=30, t=70, b=40),
-        hovermode="closest"
-    )
-
-    return fig
 
 
 def create_duration_distribution_chart(results, schedule_summary):
@@ -1341,10 +2729,6 @@ def create_risk_level_bar_chart(task_risk_table):
     return update_chart_layout(fig)
 
 
-# ============================================================
-# 9. ייצוא לאקסל
-# ============================================================
-
 def build_results_excel(output):
     buffer = BytesIO()
 
@@ -1384,10 +2768,6 @@ def build_results_excel(output):
     buffer.seek(0)
     return buffer
 
-
-# ============================================================
-# 10. הפונקציה הראשית
-# ============================================================
 
 def run_full_project_control_analysis(file_path, scenario_name="בסיס"):
     inputs = load_all_inputs(file_path)
@@ -1465,58 +2845,19 @@ def run_full_project_control_analysis(file_path, scenario_name="בסיס"):
     }
 
 
-# ============================================================
-# 11. רכיבי ממשק
-# ============================================================
-
-def render_hero():
-    st.markdown(
-        """
-        <div class="hero-box" dir="rtl">
-            <div class="hero-title" dir="rtl">📊 פלטפורמת בקרת פרויקטים ואופטימיזציה</div>
-            <div class="hero-subtitle" dir="rtl">
-                מערכת לניתוח לו״ז, סיכונים ורזרבות בפרויקטי בנייה ותשתיות באמצעות
-                Monte Carlo, התפלגות PERT, מדדי P50/P85/P90 ומודל פיננסי לרזרבות.
-            </div>
-            <span class="hero-badge">Project Controls</span>
-            <span class="hero-badge">Monte Carlo</span>
-            <span class="hero-badge">Risk Analytics</span>
-            <span class="hero-badge">Financial Reserve</span>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+def project_risk_level_text(prob_delay):
+    if prob_delay >= 0.70:
+        return "קריטי", "status-critical"
+    if prob_delay >= 0.40:
+        return "גבוה", "status-high"
+    if prob_delay >= 0.20:
+        return "בינוני", "status-medium"
+    return "נמוך", "status-good"
 
 
-def render_kpi_cards(schedule_summary, financial_summary):
-    kpi_data = [
-        ("P50", format_days(schedule_summary["P50"]), "משך חציוני צפוי"),
-        ("P85", format_days(schedule_summary["P85"]), "משך ברמת ביטחון גבוהה"),
-        ("P90", format_days(schedule_summary["P90"]), "תרחיש שמרני יותר"),
-        ("הסתברות איחור", format_percent(schedule_summary["הסתברות איחור"]), "מול משך היעד"),
-        ("רזרבת ימים", format_days(financial_summary["רזרבת ימים לפי רמת הביטחון"]), "לפי רמת הביטחון"),
-        ("רזרבה כספית", format_money(financial_summary["רזרבה מומלצת לפי רמת הביטחון"]), "לפי רמת הביטחון"),
-    ]
-
-    cols = st.columns(6)
-
-    for col, (label, value, note) in zip(cols, kpi_data):
-        with col:
-            st.markdown(
-                f"""
-                <div class="kpi-card" dir="rtl">
-                    <div class="kpi-label" dir="rtl">{label}</div>
-                    <div class="kpi-value" dir="rtl">{value}</div>
-                    <div class="kpi-note" dir="rtl">{note}</div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-
-def render_status_card(schedule_summary, financial_summary):
+def render_project_status_card(schedule_summary, financial_summary):
     prob_delay = schedule_summary["הסתברות איחור"]
-    risk_text, risk_class = risk_level_text(prob_delay)
+    risk_text, risk_class = project_risk_level_text(prob_delay)
 
     target = schedule_summary["משך יעד"]
     p50 = schedule_summary["P50"]
@@ -1529,322 +2870,324 @@ def render_status_card(schedule_summary, financial_summary):
         f"""
         <div class="status-card {risk_class}" dir="rtl">
             סטטוס פרויקט: סיכון לו״ז {risk_text}
-            <div class="status-small" dir="rtl">
+            <br>
+            <span style="font-size:13px;font-weight:400;">
                 משך יעד: {target:.1f} ימים |
                 P50: {p50:.1f} ימים |
                 P85: {p85:.1f} ימים |
                 P90: {p90:.1f} ימים |
                 רזרבת ימים מומלצת: {reserve_days:.1f} |
                 רזרבה כספית מומלצת: {format_money(reserve_money)}
-            </div>
+            </span>
         </div>
         """,
         unsafe_allow_html=True
     )
 
 
-def render_insights(insights):
-    for i, insight in enumerate(insights, start=1):
+def project_recommendation_card_html(row):
+    risk_level = str(row["רמת סיכון"])
+
+    if "גבוה" in risk_level:
+        risk_class = "risk-high"
+    elif "בינ" in risk_level:
+        risk_class = "risk-medium"
+    else:
+        risk_class = "risk-low"
+
+    return f"""
+    <div class="recommendation-card" dir="rtl">
+        <div class="recommendation-title" dir="rtl">
+            {html.escape(str(row["שם פעילות"]))}
+        </div>
+        <div class="recommendation-meta" dir="rtl">
+            מזהה: {html.escape(str(row["מזהה פעילות"]))} |
+            שלב: {html.escape(str(row["שלב"]))} |
+            אחראי: {html.escape(str(row["אחראי"]))} |
+            רמת סיכון:
+            <span class="risk-badge {risk_class}">{html.escape(risk_level)}</span> |
+            עדיפות: {html.escape(str(row["עדיפות טיפול"]))}
+        </div>
+        <div class="recommendation-action" dir="rtl">
+            <b>סיבה מרכזית:</b> {html.escape(str(row["סיבה מרכזית"]))}<br>
+            <b>פעולה מומלצת:</b> {html.escape(str(row["פעולה מומלצת"]))}
+        </div>
+    </div>
+    """
+
+
+def render_project_recommendation_cards(recommendations_table, max_cards=6):
+    top = recommendations_table.head(max_cards).reset_index(drop=True)
+
+    for i in range(0, len(top), 2):
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown(project_recommendation_card_html(top.iloc[i]), unsafe_allow_html=True)
+
+        if i + 1 < len(top):
+            with col2:
+                st.markdown(project_recommendation_card_html(top.iloc[i + 1]), unsafe_allow_html=True)
+
+
+def render_project_controls_module():
+    st.header("בקרת פרויקט וניהול לו״ז")
+    st.write(
+        "במסלול זה מעלים קובץ Excel של פרויקט, המערכת מריצה סימולציית Monte Carlo "
+        "ומציגה P50/P85/P90, הסתברות איחור, רזרבות, גרפים והמלצות פעולה."
+    )
+
+    uploaded_file = st.file_uploader(
+        "העלה קובץ Excel של הפרויקט",
+        type=["xlsx"],
+        key="project_file_uploader"
+    )
+
+    if uploaded_file is None:
+        st.info("העלה קובץ Excel כדי להתחיל.")
+        return
+
+    try:
+        preview_inputs = load_all_inputs(uploaded_file)
+        scenarios_df = preview_inputs["scenarios"].copy()
+        scenarios_df["scenario_name"] = scenarios_df["scenario_name"].astype(str).str.strip()
+        scenario_options = scenarios_df["scenario_name"].tolist()
+
+    except Exception as e:
+        st.error("הקובץ לא נקרא בהצלחה.")
+        st.exception(e)
+        return
+
+    col_a, col_b = st.columns([1, 2])
+
+    with col_a:
+        selected_scenario = st.selectbox(
+            "בחר תרחיש להרצה",
+            scenario_options,
+            index=0
+        )
+
+    with col_b:
+        st.write("")
+        st.write("")
+        run_button = st.button(
+            "הרץ ניתוח פרויקט",
+            use_container_width=True
+        )
+
+    if not run_button:
+        st.warning("בחר תרחיש ולחץ על כפתור הרצת הניתוח.")
+        return
+
+    with st.spinner("מריץ סימולציית Monte Carlo ומחשב תוצאות..."):
+        try:
+            output = run_full_project_control_analysis(
+                uploaded_file,
+                scenario_name=selected_scenario
+            )
+
+        except Exception as e:
+            st.error("אירעה שגיאה במהלך הניתוח.")
+            st.exception(e)
+            return
+
+    schedule_summary = output["schedule_summary"]
+    financial_summary = output["financial_summary"]
+
+    st.success("הניתוח הסתיים בהצלחה.")
+
+    st.subheader("דשבורד מנהלים — מדדי מפתח")
+
+    kpi_data = [
+        ("P50", format_days(schedule_summary["P50"]), "משך חציוני צפוי"),
+        ("P85", format_days(schedule_summary["P85"]), "משך ברמת ביטחון גבוהה"),
+        ("P90", format_days(schedule_summary["P90"]), "תרחיש שמרני יותר"),
+        ("הסתברות איחור", format_percent(schedule_summary["הסתברות איחור"]), "מול משך היעד"),
+        ("רזרבת ימים", format_days(financial_summary["רזרבת ימים לפי רמת הביטחון"]), "לפי רמת הביטחון"),
+        ("רזרבה כספית", format_money(financial_summary["רזרבה מומלצת לפי רמת הביטחון"]), "לפי רמת הביטחון"),
+    ]
+
+    render_kpi_cards(kpi_data, columns=6)
+    render_project_status_card(schedule_summary, financial_summary)
+
+    tabs = st.tabs([
+        "סיכום מנהלים",
+        "גרפים",
+        "טבלת סיכונים",
+        "המלצות פעולה",
+        "נתוני קלט",
+        "הורדת דוח"
+    ])
+
+    with tabs[0]:
+        st.subheader("סיכום מנהלים")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("### סיכום לו״ז הסתברותי")
+
+            schedule_df = pd.DataFrame(
+                [
+                    ["משך ממוצע", format_days(schedule_summary["משך ממוצע"])],
+                    ["סטיית תקן", format_days(schedule_summary["סטיית תקן"])],
+                    ["P50", format_days(schedule_summary["P50"])],
+                    ["P85", format_days(schedule_summary["P85"])],
+                    ["P90", format_days(schedule_summary["P90"])],
+                    ["משך יעד", format_days(schedule_summary["משך יעד"])],
+                    ["הסתברות איחור", format_percent(schedule_summary["הסתברות איחור"])]
+                ],
+                columns=["מדד", "ערך"]
+            )
+
+            display_summary_table(schedule_df)
+
+        with col2:
+            st.markdown("### סיכום פיננסי")
+
+            financial_df = pd.DataFrame(
+                [
+                    ["תקציב בסיסי", format_money(financial_summary["תקציב בסיסי"])],
+                    ["ריבית שנתית", format_percent(financial_summary["ריבית שנתית"])],
+                    ["עלות תקורה יומית", format_money(financial_summary["עלות תקורה יומית"])],
+                    ["מדד תשומות שנתי", format_percent(financial_summary["מדד תשומות שנתי"])],
+                    ["עלות עיכוב ממוצעת", format_money(financial_summary["עלות עיכוב ממוצעת"])],
+                    ["עלות עיכוב P50", format_money(financial_summary["עלות עיכוב P50"])],
+                    ["עלות עיכוב P85", format_money(financial_summary["עלות עיכוב P85"])],
+                    ["עלות עיכוב P90", format_money(financial_summary["עלות עיכוב P90"])],
+                    ["רזרבה מומלצת", format_money(financial_summary["רזרבה מומלצת לפי רמת הביטחון"])],
+                    ["רזרבת ימים", format_days(financial_summary["רזרבת ימים לפי רמת הביטחון"])]
+                ],
+                columns=["מדד", "ערך"]
+            )
+
+            display_summary_table(financial_df)
+
+        st.divider()
+
+        st.subheader("תובנות ניהוליות")
+        render_insights(output["insights"])
+
+        st.divider()
+
+        st.subheader("פעולות מומלצות ראשונות")
+        render_project_recommendation_cards(output["recommendations_table"], max_cards=4)
+
+    with tabs[1]:
+        st.subheader("גרפים וניתוח ויזואלי")
+
+        chart_col1, chart_col2 = st.columns(2)
+        chart_items = list(output["figures"].items())
+
+        for idx, (title, fig) in enumerate(chart_items):
+            if idx % 2 == 0:
+                with chart_col1:
+                    st.markdown(f"### {title}")
+                    st.plotly_chart(fig, use_container_width=True)
+            else:
+                with chart_col2:
+                    st.markdown(f"### {title}")
+                    st.plotly_chart(fig, use_container_width=True)
+
+    with tabs[2]:
+        st.subheader("טבלת סיכונים לפי פעילות")
+        st.dataframe(
+            output["task_risk_table"],
+            use_container_width=True,
+            hide_index=True
+        )
+
+    with tabs[3]:
+        st.subheader("המלצות פעולה לפי פעילות")
+
+        render_project_recommendation_cards(output["recommendations_table"], max_cards=8)
+
+        st.markdown("### טבלת המלצות מלאה")
+
+        st.dataframe(
+            output["recommendations_table"],
+            use_container_width=True,
+            hide_index=True
+        )
+
+    with tabs[4]:
+        st.subheader("נתוני קלט מעובדים")
+
+        input_tab1, input_tab2, input_tab3 = st.tabs([
+            "משימות",
+            "קשרים",
+            "סיכונים"
+        ])
+
+        with input_tab1:
+            st.dataframe(
+                output["tasks"],
+                use_container_width=True,
+                hide_index=True
+            )
+
+        with input_tab2:
+            st.dataframe(
+                output["links"],
+                use_container_width=True,
+                hide_index=True
+            )
+
+        with input_tab3:
+            st.dataframe(
+                output["risks"],
+                use_container_width=True,
+                hide_index=True
+            )
+
+    with tabs[5]:
+        st.subheader("הורדת קובץ תוצאות")
+
+        excel_buffer = build_results_excel(output)
+
+        st.download_button(
+            label="הורד קובץ תוצאות Excel",
+            data=excel_buffer,
+            file_name="תוצאות_פלטפורמת_בקרת_פרויקט.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+
         st.markdown(
-            f"""
-            <div class="insight-box" dir="rtl">
-                <b>{i}.</b> {insight}
+            """
+            <div class="footer-note" dir="rtl">
+            הערה: המודל מבוסס על הנתונים שהוזנו בקובץ האקסל. בפרויקט אמיתי יש לוודא
+            שהאומדנים, הסיכונים, הקשרים והפרמטרים הפיננסיים נבדקו ואושרו על ידי מנהל הפרויקט.
             </div>
             """,
             unsafe_allow_html=True
         )
 
 
-def recommendation_card_html(row):
-    risk_class = risk_badge_class(row["רמת סיכון"])
-
-    return f"""
-    <div class="recommendation-card" dir="rtl">
-        <div class="recommendation-title" dir="rtl">
-            {row["שם פעילות"]}
-        </div>
-        <div class="recommendation-meta" dir="rtl">
-            מזהה: {row["מזהה פעילות"]} |
-            שלב: {row["שלב"]} |
-            אחראי: {row["אחראי"]} |
-            רמת סיכון:
-            <span class="risk-badge {risk_class}">{row["רמת סיכון"]}</span> |
-            עדיפות: {row["עדיפות טיפול"]}
-        </div>
-        <div class="recommendation-action" dir="rtl">
-            <b>סיבה מרכזית:</b> {row["סיבה מרכזית"]}<br>
-            <b>פעולה מומלצת:</b> {row["פעולה מומלצת"]}
-        </div>
-    </div>
-    """
-
-
-def render_recommendation_cards(recommendations_table, max_cards=6, two_columns=True):
-    top = recommendations_table.head(max_cards).reset_index(drop=True)
-
-    if not two_columns:
-        for _, row in top.iterrows():
-            st.markdown(recommendation_card_html(row), unsafe_allow_html=True)
-        return
-
-    for i in range(0, len(top), 2):
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.markdown(recommendation_card_html(top.iloc[i]), unsafe_allow_html=True)
-
-        if i + 1 < len(top):
-            with col2:
-                st.markdown(recommendation_card_html(top.iloc[i + 1]), unsafe_allow_html=True)
-
-
 # ============================================================
-# 12. ממשק המשתמש הראשי
+# ממשק ראשי
 # ============================================================
 
 render_hero()
 
 with st.sidebar:
-    st.header("⚙️ הגדרות הרצה")
-    st.write("1. העלה קובץ Excel")
-    st.write("2. בחר תרחיש")
-    st.write("3. לחץ על הרצת ניתוח")
+    st.header("ניווט")
+    st.write("בחר את סוג הניתוח שתרצה לבצע.")
     st.divider()
-    st.caption("הקובץ חייב לכלול את הגיליונות: משימות, קשרים, פרמטרים פיננסיים, סיכונים, תרחישים.")
+    st.caption("המערכת כוללת שני מסלולים: בדיקת כדאיות מכרזים ובקרת פרויקטים.")
 
-uploaded_file = st.file_uploader(
-    "העלה קובץ Excel של הפרויקט",
-    type=["xlsx"]
+analysis_type = st.radio(
+    "בחר סוג ניתוח",
+    [
+        "בדיקת כדאיות מכרזים",
+        "בקרת פרויקט וניהול לו״ז"
+    ],
+    horizontal=True
 )
 
-if uploaded_file is None:
-    st.info("העלה קובץ Excel כדי להתחיל.")
-    st.stop()
+st.divider()
 
-try:
-    preview_inputs = load_all_inputs(uploaded_file)
-    scenarios_df = preview_inputs["scenarios"].copy()
-    scenarios_df["scenario_name"] = scenarios_df["scenario_name"].astype(str).str.strip()
-    scenario_options = scenarios_df["scenario_name"].tolist()
-
-except Exception as e:
-    st.error("הקובץ לא נקרא בהצלחה.")
-    st.exception(e)
-    st.stop()
-
-col_a, col_b = st.columns([1, 2])
-
-with col_a:
-    selected_scenario = st.selectbox(
-        "בחר תרחיש להרצה",
-        scenario_options,
-        index=0
-    )
-
-with col_b:
-    st.write("")
-    st.write("")
-    run_button = st.button(
-        "🚀 הרץ ניתוח פרויקט",
-        use_container_width=True
-    )
-
-if not run_button:
-    st.warning("בחר תרחיש ולחץ על כפתור הרצת הניתוח.")
-    st.stop()
-
-with st.spinner("מריץ סימולציית Monte Carlo ומחשב תוצאות..."):
-    try:
-        output = run_full_project_control_analysis(
-            uploaded_file,
-            scenario_name=selected_scenario
-        )
-
-    except Exception as e:
-        st.error("אירעה שגיאה במהלך הניתוח.")
-        st.exception(e)
-        st.stop()
-
-schedule_summary = output["schedule_summary"]
-financial_summary = output["financial_summary"]
-
-st.success("הניתוח הסתיים בהצלחה.")
-
-st.subheader("דשבורד מנהלים — מדדי מפתח")
-render_kpi_cards(schedule_summary, financial_summary)
-render_status_card(schedule_summary, financial_summary)
-
-
-# ============================================================
-# 13. טאבים
-# ============================================================
-
-tabs = st.tabs([
-    "סיכום מנהלים",
-    "גרפים",
-    "טבלת סיכונים",
-    "המלצות פעולה",
-    "נתוני קלט",
-    "הורדת דוח"
-])
-
-
-with tabs[0]:
-    st.subheader("סיכום מנהלים")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.markdown("### סיכום לו״ז הסתברותי")
-
-        schedule_df = pd.DataFrame(
-            [
-                ["משך ממוצע", format_days(schedule_summary["משך ממוצע"])],
-                ["סטיית תקן", format_days(schedule_summary["סטיית תקן"])],
-                ["P50", format_days(schedule_summary["P50"])],
-                ["P85", format_days(schedule_summary["P85"])],
-                ["P90", format_days(schedule_summary["P90"])],
-                ["משך יעד", format_days(schedule_summary["משך יעד"])],
-                ["הסתברות איחור", format_percent(schedule_summary["הסתברות איחור"])]
-            ],
-            columns=["מדד", "ערך"]
-        )
-
-        display_summary_table(schedule_df)
-
-    with col2:
-        st.markdown("### סיכום פיננסי")
-
-        financial_df = pd.DataFrame(
-            [
-                ["תקציב בסיסי", format_money(financial_summary["תקציב בסיסי"])],
-                ["ריבית שנתית", format_percent(financial_summary["ריבית שנתית"])],
-                ["עלות תקורה יומית", format_money(financial_summary["עלות תקורה יומית"])],
-                ["מדד תשומות שנתי", format_percent(financial_summary["מדד תשומות שנתי"])],
-                ["עלות עיכוב ממוצעת", format_money(financial_summary["עלות עיכוב ממוצעת"])],
-                ["עלות עיכוב P50", format_money(financial_summary["עלות עיכוב P50"])],
-                ["עלות עיכוב P85", format_money(financial_summary["עלות עיכוב P85"])],
-                ["עלות עיכוב P90", format_money(financial_summary["עלות עיכוב P90"])],
-                ["רזרבה מומלצת", format_money(financial_summary["רזרבה מומלצת לפי רמת הביטחון"])],
-                ["רזרבת ימים", format_days(financial_summary["רזרבת ימים לפי רמת הביטחון"])]
-            ],
-            columns=["מדד", "ערך"]
-        )
-
-        display_summary_table(financial_df)
-
-    st.divider()
-
-    st.subheader("תובנות ניהוליות")
-    render_insights(output["insights"])
-
-    st.divider()
-
-    st.subheader("פעולות מומלצות ראשונות")
-    render_recommendation_cards(output["recommendations_table"], max_cards=4, two_columns=True)
-
-
-with tabs[1]:
-    st.subheader("גרפים וניתוח ויזואלי")
-    st.caption("הגרפים מציגים את התפלגות משך הפרויקט, רמות ביטחון, קריטיות, סיכון משולב ועלויות.")
-
-    chart_col1, chart_col2 = st.columns(2)
-    chart_items = list(output["figures"].items())
-
-    for idx, (title, fig) in enumerate(chart_items):
-        if idx % 2 == 0:
-            with chart_col1:
-                st.markdown(f"### {title}")
-                st.plotly_chart(fig, use_container_width=True)
-        else:
-            with chart_col2:
-                st.markdown(f"### {title}")
-                st.plotly_chart(fig, use_container_width=True)
-
-
-with tabs[2]:
-    st.subheader("טבלת סיכונים לפי פעילות")
-    st.caption("הטבלה מדרגת פעילויות לפי קריטיות, פער P90, תוספת מסיכונים, סטיית תקן וציון סיכון משולב.")
-
-    st.dataframe(
-        output["task_risk_table"],
-        use_container_width=True,
-        hide_index=True
-    )
-
-
-with tabs[3]:
-    st.subheader("המלצות פעולה לפי פעילות")
-    st.caption("המערכת מייצרת המלצות פעולה ראשוניות לפי מאפייני הפעילות ומדדי הסיכון.")
-
-    render_recommendation_cards(output["recommendations_table"], max_cards=8, two_columns=True)
-
-    st.markdown("### טבלת המלצות מלאה")
-
-    st.dataframe(
-        output["recommendations_table"],
-        use_container_width=True,
-        hide_index=True
-    )
-
-
-with tabs[4]:
-    st.subheader("נתוני קלט מעובדים")
-
-    input_tab1, input_tab2, input_tab3 = st.tabs([
-        "משימות",
-        "קשרים",
-        "סיכונים"
-    ])
-
-    with input_tab1:
-        st.dataframe(
-            output["tasks"],
-            use_container_width=True,
-            hide_index=True
-        )
-
-    with input_tab2:
-        st.dataframe(
-            output["links"],
-            use_container_width=True,
-            hide_index=True
-        )
-
-    with input_tab3:
-        st.dataframe(
-            output["risks"],
-            use_container_width=True,
-            hide_index=True
-        )
-
-
-with tabs[5]:
-    st.subheader("הורדת קובץ תוצאות")
-
-    st.markdown(
-        """
-        הקובץ כולל את כל תוצאות הניתוח: סיכום לו״ז, סיכום פיננסי,
-        טבלת סיכונים, המלצות פעולה, תובנות ותוצאות סימולציה.
-        """
-    )
-
-    excel_buffer = build_results_excel(output)
-
-    st.download_button(
-        label="⬇️ הורד קובץ תוצאות Excel",
-        data=excel_buffer,
-        file_name="תוצאות_פלטפורמת_בקרת_פרויקט.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True
-    )
-
-    st.markdown(
-        """
-        <div class="footer-note" dir="rtl">
-        הערה: המודל מבוסס על הנתונים שהוזנו בקובץ האקסל. בפרויקט אמיתי יש לוודא
-        שהאומדנים, הסיכונים, הקשרים והפרמטרים הפיננסיים נבדקו ואושרו על ידי מנהל הפרויקט.
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+if analysis_type == "בדיקת כדאיות מכרזים":
+    render_tender_module()
+else:
+    render_project_controls_module()
