@@ -31,87 +31,54 @@ st.set_page_config(
 )
 
 
-# ============================================================
-# הגנת סיסמה — האתר מכיל נתונים עסקיים אמיתיים (מחירי הצעות, שולי רווח)
-# ולכן חייב להיות נעול מאחורי סיסמה ולא נגיש לכל מי שיש לו את הקישור.
-# הסיסמה עצמה לא נמצאת בקוד (שנמצא בריפו ציבורי!) אלא ב-Streamlit Secrets:
-# Settings -> Secrets, ולהוסיף שורה: APP_PASSWORD = "הסיסמה שתבחר"
-# ============================================================
-
-def check_password():
-    def password_entered():
-        correct_password = None
-        try:
-            correct_password = st.secrets.get("APP_PASSWORD")
-        except Exception:
-            correct_password = None
-
-        if correct_password and st.session_state.get("password_input_field") == correct_password:
-            st.session_state["password_correct"] = True
-            st.session_state.pop("password_input_field", None)
-        else:
-            st.session_state["password_correct"] = False
-
-    if st.session_state.get("password_correct"):
-        return True
-
-    try:
-        configured_password = st.secrets.get("APP_PASSWORD")
-    except Exception:
-        configured_password = None
-
-    st.markdown(
-        """
-        <div dir="rtl" style="max-width:420px;margin:80px auto;text-align:center;
-        font-family:Arial, sans-serif;">
-            <div style="font-size:40px;">🔒</div>
-            <h2>גישה מוגבלת</h2>
-            <p style="color:#666;">האתר מכיל נתוני מכרזים ופרויקטים עסקיים. יש להזין סיסמה כדי להמשיך.</p>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    if not configured_password:
-        st.warning(
-            "לא הוגדרה סיסמה למערכת עדיין. יש להוסיף secret בשם APP_PASSWORD "
-            "בהגדרות האפליקציה ב-Streamlit Cloud (Settings → Secrets) כדי לאפשר כניסה."
-        )
-        return False
-
-    _, center_col, _ = st.columns([1, 1, 1])
-
-    with center_col:
-        st.text_input(
-            "סיסמה",
-            type="password",
-            key="password_input_field",
-            on_change=password_entered
-        )
-
-        if st.session_state.get("password_correct") is False:
-            st.error("סיסמה שגויה, נסה שוב.")
-
-    return False
-
-
-if not check_password():
-    st.stop()
-
-
 st.markdown(
     """
     <style>
+    @import url('https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800;900&display=swap');
+
+    :root {
+        --brand-navy: #0f172a;
+        --brand-blue-dark: #1e3a8a;
+        --brand-blue: #2563eb;
+        --brand-blue-light: #3b82f6;
+        --brand-sky: #38bdf8;
+        --surface: #ffffff;
+        --surface-muted: #f6f8fc;
+        --border-soft: #e6e9f2;
+        --text-main: #0f172a;
+        --text-muted: #64748b;
+        --radius-sm: 12px;
+        --radius-md: 16px;
+        --radius-lg: 22px;
+        --shadow-soft: 0 8px 24px rgba(15, 23, 42, 0.06);
+        --shadow-lift: 0 16px 34px rgba(37, 99, 235, 0.16);
+    }
+
     html, body {
         direction: rtl;
+    }
+
+    html, body, [class*="css"] {
+        font-family: 'Heebo', Arial, sans-serif !important;
+    }
+
+    /* רקע כללי רך לעמוד, כך שכרטיסים לבנים "צפים" מעליו ונראים כתוכן מעוצב
+       ולא כברירת מחדל דביקה של Streamlit */
+    [data-testid="stAppViewContainer"] {
+        background: linear-gradient(180deg, #f4f7fc 0%, #f6f8fc 260px, #f8fafc 100%);
+    }
+
+    [data-testid="stHeader"] {
+        background: transparent;
     }
 
     .block-container {
         direction: rtl;
         text-align: right;
-        font-family: Arial, sans-serif;
-        padding-top: 1.2rem;
+        font-family: 'Heebo', Arial, sans-serif;
+        padding-top: 1.4rem;
         padding-bottom: 3rem;
+        max-width: 1200px;
     }
 
     /* רקע בהיר קבוע לתפריט הצד + צבע טקסט כהה קבוע לצידו (חובה יחד):
@@ -121,17 +88,198 @@ st.markdown(
     section[data-testid="stSidebar"] {
         direction: rtl;
         text-align: right;
-        background-color: #f1f5f9;
+        background: linear-gradient(180deg, #f1f5f9 0%, #eef2f9 100%);
+        border-left: 1px solid var(--border-soft);
     }
 
     section[data-testid="stSidebar"] * {
         color: #0f172a !important;
+        font-family: 'Heebo', Arial, sans-serif !important;
     }
 
     h1, h2, h3, h4, h5, h6, p, label {
         direction: rtl;
         text-align: right;
-        font-family: Arial, sans-serif;
+        font-family: 'Heebo', Arial, sans-serif;
+        color: var(--text-main);
+    }
+
+    h2, h3 {
+        font-weight: 800;
+        letter-spacing: -0.01em;
+    }
+
+    /* --------------------------------------------------------
+       לשוניות (st.tabs) — בברירת המחדל של Streamlit הן צפופות,
+       קטנות וקשה להבחין מה נבחר. הופכים אותן לפילים מודגשים
+       בתוך מסילה אפורה, עם מעבר חלק ורקע כחול בולט ללשונית הפעילה.
+       -------------------------------------------------------- */
+    div[data-testid="stTabs"] [role="tablist"] {
+        direction: rtl;
+        gap: 6px;
+        background-color: #eef1f8;
+        padding: 6px;
+        border-radius: 999px;
+        border: 1px solid var(--border-soft);
+        width: fit-content;
+        margin-bottom: 4px;
+        flex-wrap: wrap;
+    }
+
+    div[data-testid="stTabs"] [data-testid="stTab"] {
+        border-radius: 999px;
+        padding: 8px 20px;
+        font-weight: 600;
+        font-size: 14.5px;
+        color: var(--text-muted);
+        transition: all 0.18s ease;
+        background-color: transparent;
+    }
+
+    div[data-testid="stTabs"] [data-testid="stTab"]:hover {
+        color: var(--brand-blue-dark);
+        background-color: rgba(37, 99, 235, 0.08);
+    }
+
+    div[data-testid="stTabs"] [data-testid="stTab"][aria-selected="true"] {
+        background: linear-gradient(135deg, var(--brand-blue-dark) 0%, var(--brand-blue) 100%);
+        color: #ffffff !important;
+        box-shadow: 0 8px 18px rgba(37, 99, 235, 0.28);
+    }
+
+    div[data-testid="stTabs"] [data-testid="stTab"][aria-selected="true"] p {
+        color: #ffffff !important;
+        font-weight: 700;
+    }
+
+    div[data-testid="stTabs"] .react-aria-SelectionIndicator {
+        display: none;
+    }
+
+    div[data-testid="stTabPanel"] {
+        padding-top: 20px;
+    }
+
+    /* --------------------------------------------------------
+       כפתורים — פיל מודגש עם גרדיאנט תואם למותג ואפקט ריחוף
+       -------------------------------------------------------- */
+    button[data-testid^="stBaseButton"] {
+        border-radius: 999px !important;
+        font-weight: 700 !important;
+        transition: all 0.18s ease !important;
+        border: 1px solid var(--border-soft) !important;
+    }
+
+    button[data-testid="stBaseButton-primary"],
+    button[data-testid="stBaseButton-primaryFormSubmit"],
+    button[data-testid="stBaseButton-secondaryFormSubmit"] {
+        background: linear-gradient(135deg, var(--brand-blue-dark) 0%, var(--brand-blue) 100%) !important;
+        color: #ffffff !important;
+        border: none !important;
+        box-shadow: 0 10px 22px rgba(37, 99, 235, 0.22) !important;
+    }
+
+    button[data-testid^="stBaseButton"]:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 14px 28px rgba(37, 99, 235, 0.3) !important;
+    }
+
+    div[data-testid="stDownloadButton"] button {
+        background: linear-gradient(135deg, var(--brand-blue-dark) 0%, var(--brand-blue) 100%) !important;
+        color: #ffffff !important;
+        border: none !important;
+    }
+
+    /* --------------------------------------------------------
+       שדות קלט — פינות מעוגלות עקביות + מסגרת עדינה + זוהר בפוקוס
+       -------------------------------------------------------- */
+    div[data-testid="stNumberInputContainer"],
+    div[data-baseweb="select"] > div,
+    div[data-testid="stTextInput"] div[data-baseweb="input"],
+    div[data-testid="stTextInput"] input {
+        border-radius: var(--radius-sm) !important;
+        border-color: var(--border-soft) !important;
+    }
+
+    div[data-testid="stSlider"] [role="slider"] {
+        background-color: var(--brand-blue) !important;
+        box-shadow: 0 0 0 6px rgba(37, 99, 235, 0.15) !important;
+    }
+
+    div[data-testid="stSlider"] div[data-testid="stSliderTrackFilled"],
+    div[data-testid="stSlider"] div[style*="background-color: rgb(255, 75, 75)"] {
+        background: linear-gradient(90deg, var(--brand-blue-dark), var(--brand-blue)) !important;
+    }
+
+    /* --------------------------------------------------------
+       Expanders — כרטיס עדין עקבי עם שאר הכרטיסים באתר
+       -------------------------------------------------------- */
+    div[data-testid="stExpander"] {
+        border: 1px solid var(--border-soft) !important;
+        border-radius: var(--radius-md) !important;
+        background-color: var(--surface) !important;
+        box-shadow: var(--shadow-soft);
+        overflow: hidden;
+    }
+
+    div[data-testid="stExpander"] summary {
+        font-weight: 600;
+        padding: 10px 16px !important;
+    }
+
+    /* --------------------------------------------------------
+       טבלאות אינטראקטיביות (st.dataframe) — מסגרת מעוגלת + צל עדין
+       -------------------------------------------------------- */
+    div[data-testid="stDataFrame"],
+    div[data-testid="stDataEditor"] {
+        direction: rtl;
+        border-radius: var(--radius-md);
+        overflow: hidden;
+        border: 1px solid var(--border-soft);
+        box-shadow: var(--shadow-soft);
+    }
+
+    /* --------------------------------------------------------
+       רדיו אופקי ("בחר סוג ניתוח") — הופך לבורר פילים מודגש
+       במקום עיגולי רדיו סטנדרטיים
+       -------------------------------------------------------- */
+    div[data-testid="stRadioGroup"] {
+        gap: 8px;
+    }
+
+    label[data-testid="stRadioOption"] {
+        border: 1px solid var(--border-soft);
+        background-color: var(--surface);
+        padding: 8px 18px;
+        border-radius: 999px;
+        transition: all 0.18s ease;
+        box-shadow: var(--shadow-soft);
+        cursor: pointer;
+    }
+
+    label[data-testid="stRadioOption"] > div > div > div:first-child {
+        display: none;
+    }
+
+    label[data-testid="stRadioOption"][data-selected="true"] {
+        background: linear-gradient(135deg, var(--brand-blue-dark) 0%, var(--brand-blue) 100%);
+        border-color: transparent;
+        box-shadow: 0 10px 20px rgba(37, 99, 235, 0.24);
+    }
+
+    label[data-testid="stRadioOption"][data-selected="true"] p {
+        color: #ffffff !important;
+        font-weight: 700;
+    }
+
+    /* צ'קבוקסים — צבע מותג כחול במקום אדום ברירת המחדל */
+    div[data-testid="stCheckbox"] label[data-selected="true"] > div:first-of-type {
+        background-color: var(--brand-blue) !important;
+        border-color: var(--brand-blue) !important;
+    }
+
+    div[data-testid="stCheckbox"] svg polyline {
+        stroke: #ffffff;
     }
 
     .hero-box {
@@ -178,12 +326,19 @@ st.markdown(
     .kpi-card {
         direction: rtl;
         text-align: right;
-        background-color: #f8fafc;
-        border: 1px solid #e5e7eb;
-        border-radius: 18px;
+        background-color: #ffffff;
+        border: 1px solid var(--border-soft);
+        border-top: 3px solid var(--brand-blue);
+        border-radius: var(--radius-md);
         padding: 18px;
         min-height: 120px;
-        box-shadow: 0 8px 18px rgba(15, 23, 42, 0.04);
+        box-shadow: var(--shadow-soft);
+        transition: transform 0.18s ease, box-shadow 0.18s ease;
+    }
+
+    .kpi-card:hover {
+        transform: translateY(-3px);
+        box-shadow: var(--shadow-lift);
     }
 
     .kpi-label {
@@ -374,6 +529,78 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
+
+# ============================================================
+# הגנת סיסמה — האתר מכיל נתונים עסקיים אמיתיים (מחירי הצעות, שולי רווח)
+# ולכן חייב להיות נעול מאחורי סיסמה ולא נגיש לכל מי שיש לו את הקישור.
+# הסיסמה עצמה לא נמצאת בקוד (שנמצא בריפו ציבורי!) אלא ב-Streamlit Secrets:
+# Settings -> Secrets, ולהוסיף שורה: APP_PASSWORD = "הסיסמה שתבחר"
+# ============================================================
+
+def check_password():
+    def password_entered():
+        correct_password = None
+        try:
+            correct_password = st.secrets.get("APP_PASSWORD")
+        except Exception:
+            correct_password = None
+
+        if correct_password and st.session_state.get("password_input_field") == correct_password:
+            st.session_state["password_correct"] = True
+            st.session_state.pop("password_input_field", None)
+        else:
+            st.session_state["password_correct"] = False
+
+    if st.session_state.get("password_correct"):
+        return True
+
+    try:
+        configured_password = st.secrets.get("APP_PASSWORD")
+    except Exception:
+        configured_password = None
+
+    st.markdown(
+        """
+        <div dir="rtl" style="max-width:440px;margin:90px auto 24px auto;text-align:center;
+        font-family:'Heebo', Arial, sans-serif; background:#ffffff; border:1px solid #e6e9f2;
+        border-radius:22px; padding:40px 32px; box-shadow:0 16px 36px rgba(15,23,42,0.08);">
+            <div style="width:64px;height:64px;margin:0 auto 18px auto;border-radius:50%;
+            background:linear-gradient(135deg,#1e3a8a 0%,#2563eb 100%);
+            display:flex;align-items:center;justify-content:center;font-size:28px;
+            box-shadow:0 10px 22px rgba(37,99,235,0.28);">🔒</div>
+            <h2 style="margin-bottom:8px;font-weight:800;color:#0f172a;">גישה מוגבלת</h2>
+            <p style="color:#64748b;line-height:1.7;">האתר מכיל נתוני מכרזים ופרויקטים עסקיים. יש להזין סיסמה כדי להמשיך.</p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    if not configured_password:
+        st.warning(
+            "לא הוגדרה סיסמה למערכת עדיין. יש להוסיף secret בשם APP_PASSWORD "
+            "בהגדרות האפליקציה ב-Streamlit Cloud (Settings → Secrets) כדי לאפשר כניסה."
+        )
+        return False
+
+    _, center_col, _ = st.columns([1, 1, 1])
+
+    with center_col:
+        st.text_input(
+            "סיסמה",
+            type="password",
+            key="password_input_field",
+            on_change=password_entered
+        )
+
+        if st.session_state.get("password_correct") is False:
+            st.error("סיסמה שגויה, נסה שוב.")
+
+    return False
+
+
+if not check_password():
+    st.stop()
 
 
 # ============================================================
