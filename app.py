@@ -2984,7 +2984,20 @@ def default_manual_risk_df():
     )
 
 
-def build_manual_tasks_df(ui_df):
+UNCERTAINTY_LEVELS = {
+    "אומדן ראשוני / תכנון מוקדם (טווח רחב)": (0.35, 0.60),
+    "אומדן בינוני / תכנון מפורט (ברירת מחדל)": (0.20, 0.30),
+    "אומדן מבוסס / אחרי מכרז או חוזה (טווח צר)": (0.10, 0.15),
+}
+
+DEFAULT_UNCERTAINTY_LEVEL = "אומדן בינוני / תכנון מפורט (ברירת מחדל)"
+
+
+def build_manual_tasks_df(ui_df, uncertainty_level=DEFAULT_UNCERTAINTY_LEVEL):
+    optimistic_pct, pessimistic_pct = UNCERTAINTY_LEVELS.get(
+        uncertainty_level, UNCERTAINTY_LEVELS[DEFAULT_UNCERTAINTY_LEVEL]
+    )
+
     df = ui_df.copy()
     df["שם פעילות"] = df["שם פעילות"].apply(clean_text)
     df = df[df["שם פעילות"] != ""].reset_index(drop=True)
@@ -3012,10 +3025,10 @@ def build_manual_tasks_df(ui_df):
         pessimistic = safe_float(row.get("טווח פסימי (ימים)", 0))
 
         if optimistic <= 0:
-            optimistic = round(duration * 0.8, 1)
+            optimistic = round(duration * (1 - optimistic_pct), 1)
 
         if pessimistic <= 0:
-            pessimistic = round(duration * 1.3, 1)
+            pessimistic = round(duration * (1 + pessimistic_pct), 1)
 
         optimistic = min(optimistic, duration)
         pessimistic = max(pessimistic, duration)
@@ -3136,7 +3149,19 @@ def render_project_controls_manual():
         st.subheader("שלב 1 — פעילויות הפרויקט")
         st.caption(
             "כל שורה היא פעילות. חובה למלא שם ומשך משוער. "
-            "טווח אופטימי/פסימי ועלות הם אופציונליים — אם משאירים 0, המערכת משלימה אוטומטית."
+            "טווח אופטימי/פסימי ועלות הם אופציונליים — אם משאירים 0, המערכת משלימה אוטומטית לפי רמת "
+            "האי-ודאות שתבחר למטה (בהתאם לעקרון אומדן שלוש הנקודות / PERT מתוך PMBOK)."
+        )
+
+        uncertainty_level = st.selectbox(
+            "רמת אי-ודאות באומדן (למילוי אוטומטי של טווח אופטימי/פסימי כשלא מזינים אותם ידנית)",
+            options=list(UNCERTAINTY_LEVELS.keys()),
+            index=list(UNCERTAINTY_LEVELS.keys()).index(DEFAULT_UNCERTAINTY_LEVEL),
+            help=(
+                "ככל שהאומדן מוקדם יותר בפרויקט, כך נהוג לתת לו טווח רחב יותר בין אופטימי לפסימי "
+                "(בדומה לעקרון סיווגי דיוק אומדן מקובלים בענף הבנייה והתשתיות). "
+                "הטווח א-סימטרי בכוונה — בפועל עיכובים גדולים שכיחים יותר מהקדמות גדולות."
+            )
         )
 
         tasks_ui_df = st.data_editor(
@@ -3269,7 +3294,7 @@ def render_project_controls_manual():
     st.session_state["manual_risk_df"] = risks_ui_df
 
     try:
-        tasks_raw = build_manual_tasks_df(tasks_ui_df)
+        tasks_raw = build_manual_tasks_df(tasks_ui_df, uncertainty_level=uncertainty_level)
         task_names = tasks_raw["task_id"].tolist()
         links_raw = build_manual_links_df(links_ui_df, task_names, sequential_default)
         risks_raw = build_manual_risks_df(risks_ui_df)
