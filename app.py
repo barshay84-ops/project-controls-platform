@@ -30,6 +30,75 @@ st.set_page_config(
     layout="wide"
 )
 
+
+# ============================================================
+# הגנת סיסמה — האתר מכיל נתונים עסקיים אמיתיים (מחירי הצעות, שולי רווח)
+# ולכן חייב להיות נעול מאחורי סיסמה ולא נגיש לכל מי שיש לו את הקישור.
+# הסיסמה עצמה לא נמצאת בקוד (שנמצא בריפו ציבורי!) אלא ב-Streamlit Secrets:
+# Settings -> Secrets, ולהוסיף שורה: APP_PASSWORD = "הסיסמה שתבחר"
+# ============================================================
+
+def check_password():
+    def password_entered():
+        correct_password = None
+        try:
+            correct_password = st.secrets.get("APP_PASSWORD")
+        except Exception:
+            correct_password = None
+
+        if correct_password and st.session_state.get("password_input_field") == correct_password:
+            st.session_state["password_correct"] = True
+            st.session_state.pop("password_input_field", None)
+        else:
+            st.session_state["password_correct"] = False
+
+    if st.session_state.get("password_correct"):
+        return True
+
+    try:
+        configured_password = st.secrets.get("APP_PASSWORD")
+    except Exception:
+        configured_password = None
+
+    st.markdown(
+        """
+        <div dir="rtl" style="max-width:420px;margin:80px auto;text-align:center;
+        font-family:Arial, sans-serif;">
+            <div style="font-size:40px;">🔒</div>
+            <h2>גישה מוגבלת</h2>
+            <p style="color:#666;">האתר מכיל נתוני מכרזים ופרויקטים עסקיים. יש להזין סיסמה כדי להמשיך.</p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    if not configured_password:
+        st.warning(
+            "לא הוגדרה סיסמה למערכת עדיין. יש להוסיף secret בשם APP_PASSWORD "
+            "בהגדרות האפליקציה ב-Streamlit Cloud (Settings → Secrets) כדי לאפשר כניסה."
+        )
+        return False
+
+    _, center_col, _ = st.columns([1, 1, 1])
+
+    with center_col:
+        st.text_input(
+            "סיסמה",
+            type="password",
+            key="password_input_field",
+            on_change=password_entered
+        )
+
+        if st.session_state.get("password_correct") is False:
+            st.error("סיסמה שגויה, נסה שוב.")
+
+    return False
+
+
+if not check_password():
+    st.stop()
+
+
 st.markdown(
     """
     <style>
@@ -342,10 +411,13 @@ def safe_float(value, default=0.0):
 
 
 def safe_percent(value, default=0.0):
+    # כל שדות ה"%" באתר (סיכוי זכייה %, הסתברות %, אפקטיביות טיפול % וכו') מוזנים
+    # תמיד כמספר גולמי בין 0 ל-100 (למשל 30 = 30%), לא כשבר עשרוני.
+    # בעבר הפונקציה ניחשה לפי הגודל אם המספר כבר שבר עשרוני — וזה גרם לפרשנות
+    # הפוכה בדיוק בערכים הקטנים והחשובים ביותר לניהול סיכונים (למשל "1" שאמור
+    # להיות 1% היה מתפרש כ-100%). לכן תמיד מחלקים ב-100, בלי ניחוש.
     v = safe_float(value, default)
-    if v > 1:
-        return v / 100
-    return v
+    return v / 100
 
 
 def format_money(value):
@@ -727,7 +799,17 @@ def calculate_tender_base_results(tender_df):
         lambda x: level_to_score(x, high=100, medium=60, low=20)
     )
 
-    df["ציון EV מנורמל"] = normalize_series(df["ערך צפוי EV"])
+    # ציון ה-EV מחושב כיחס EV מול אומדן ההכנסות (לא ביחס לשאר המכרזים בהרצה).
+    # ערך צפוי ששווה ל-EV_REFERENCE_RATIO מההכנסה (ברירת מחדל: 15%) ומעלה מקבל
+    # ציון מלא. זה חשוב כדי שהציון יהיה משמעותי גם כשבודקים מכרז אחד בלבד,
+    # ולא יתנפח באופן מלאכותי רק כי מכרז אחר בהרצה גרוע יותר ממנו.
+    EV_REFERENCE_RATIO = 0.15
+    ev_ratio = np.where(
+        df["אומדן הכנסות"] > 0,
+        df["ערך צפוי EV"] / df["אומדן הכנסות"],
+        np.where(df["ערך צפוי EV"] > 0, 1.0, -1.0)
+    )
+    df["ציון EV מנורמל"] = (np.clip(ev_ratio / EV_REFERENCE_RATIO, -1, 1) + 1) / 2
     df["ציון רווחיות"] = np.clip(df["שיעור רווח"] / 0.25, -1, 1)
     df["ציון רווחיות"] = ((df["ציון רווחיות"] + 1) / 2) * 100
     df["ציון זכייה"] = df["סיכוי זכייה"] * 100
@@ -1104,11 +1186,19 @@ def optimize_tender_portfolio(tender_results, max_proposal_budget, max_tenders):
     return result_df, summary
 
 
-def calculate_markov_licensing(licensing_df):
+def calculate_licensing_duration_risk(licensing_df, n_simulations=5000, random_seed=42):
+    # הערה מתודולוגית: זה לא מודל Markov (אין כאן כמה מצבים ומטריצת מעברים
+    # ביניהם) — זהו אומדן משך המתנה עד לאישור, מבוסס על הנחה שבכל חודש יש
+    # הסתברות קבועה p לקבל את האישור (כמו הטלת מטבע חוזרת עד "עץ" ראשון).
+    # ההתפלגות הזו נקראת התפלגות גיאומטרית, והתוחלת שלה היא 1/p — אבל במקום
+    # להסתפק בממוצע נקודתי, דוגמים אותה בפועל באלפי סימולציות (כמו בשאר
+    # הכלי) כדי לקבל גם טווח P50/P90, לא רק מספר בודד.
     df = filter_rows_by_tender_id(licensing_df)
 
     if df.empty:
         return pd.DataFrame(), pd.DataFrame()
+
+    rng = np.random.default_rng(int(random_seed))
 
     df["הסתברות מעבר חודשית %"] = pd.to_numeric(
         df["הסתברות מעבר חודשית %"], errors="coerce"
@@ -1119,18 +1209,36 @@ def calculate_markov_licensing(licensing_df):
     ).fillna(0)
 
     df["הסתברות מעבר"] = df["הסתברות מעבר חודשית %"].apply(lambda x: max(safe_percent(x), 0.01))
-
     df["משך צפוי בחודשים"] = 1 / df["הסתברות מעבר"]
     df["עלות עיכוב צפויה"] = df["משך צפוי בחודשים"] * df["עלות עיכוב חודשית"]
 
-    summary = (
-        df.groupby("מזהה מכרז", dropna=False)
-        .agg(
-            משך_רישוי_צפוי=("משך צפוי בחודשים", "sum"),
-            עלות_עיכוב_רישוי_צפויה=("עלות עיכוב צפויה", "sum")
-        )
-        .reset_index()
-    )
+    summary_rows = []
+
+    for tender_id, group in df.groupby("מזהה מכרז", dropna=False):
+        total_months_samples = np.zeros(n_simulations)
+        total_cost_samples = np.zeros(n_simulations)
+
+        for _, row in group.iterrows():
+            p = row["הסתברות מעבר"]
+            monthly_cost = row["עלות עיכוב חודשית"]
+
+            # np.random.geometric(p) מחזיר את מספר הניסיונות עד להצלחה הראשונה,
+            # בדיוק המשמעות של "כמה חודשים עד שהשלב הזה יאושר".
+            months_samples = rng.geometric(p, size=n_simulations)
+
+            total_months_samples = total_months_samples + months_samples
+            total_cost_samples = total_cost_samples + months_samples * monthly_cost
+
+        summary_rows.append({
+            "מזהה מכרז": tender_id,
+            "משך_רישוי_צפוי": np.mean(total_months_samples),
+            "משך רישוי P50 (חודשים)": np.percentile(total_months_samples, 50),
+            "משך רישוי P90 (חודשים)": np.percentile(total_months_samples, 90),
+            "עלות_עיכוב_רישוי_צפויה": np.mean(total_cost_samples),
+            "עלות עיכוב רישוי P90": np.percentile(total_cost_samples, 90),
+        })
+
+    summary = pd.DataFrame(summary_rows)
 
     return df, summary
 
@@ -1154,7 +1262,7 @@ def build_tender_results_excel(output):
             output["contract_detail"].to_excel(writer, sheet_name="סיכון חוזי", index=False)
 
         if not output.get("licensing_detail", pd.DataFrame()).empty:
-            output["licensing_detail"].to_excel(writer, sheet_name="רישוי Markov", index=False)
+            output["licensing_detail"].to_excel(writer, sheet_name="רישוי - זמני היתרים", index=False)
 
         if not output.get("mc_summary", pd.DataFrame()).empty:
             output["mc_summary"].to_excel(writer, sheet_name="Monte Carlo", index=False)
@@ -1422,7 +1530,11 @@ def render_tender_module():
             check_var = st.checkbox("VaR / CVaR / CFaR", value=True)
             check_sensitivity = st.checkbox("ניתוח רגישות", value=True)
             check_portfolio = st.checkbox("אופטימיזציית פורטפוליו מכרזים", value=False)
-            check_markov = st.checkbox("מודל רישוי / Markov", value=False)
+            check_licensing = st.checkbox(
+                "אומדן משכי רישוי והיתרים",
+                value=False,
+                help="אומדן זמן המתנה לאישור/היתר לפי הסתברות מעבר חודשית, כולל טווח P50/P90 מסימולציה."
+            )
 
         st.subheader("שלב 3 — נתונים משלימים לבדיקות מתקדמות")
 
@@ -1500,7 +1612,7 @@ def render_tender_module():
                 }
             )
 
-        with st.expander("נתוני רישוי / Markov"):
+        with st.expander("נתוני רישוי והיתרים"):
             st.caption("בדיקה זו מעריכה משך ועלות עיכוב בשלבי רישוי או אישור.")
             licensing_df = st.data_editor(
                 st.session_state["licensing_input_df"],
@@ -1643,10 +1755,18 @@ def render_tender_module():
         if not contract_summary.empty:
             tender_results = tender_results.merge(contract_summary, on="מזהה מכרז", how="left")
 
-    if check_markov:
-        licensing_detail, licensing_summary = calculate_markov_licensing(licensing_df)
+    if check_licensing:
+        licensing_detail, licensing_summary = calculate_licensing_duration_risk(
+            licensing_df,
+            n_simulations=int(n_simulations),
+            random_seed=int(random_seed)
+        )
         if not licensing_summary.empty:
             tender_results = tender_results.merge(licensing_summary, on="מזהה מכרז", how="left")
+            tender_results["עלות_עיכוב_רישוי_צפויה"] = tender_results["עלות_עיכוב_רישוי_צפויה"].fillna(0)
+            tender_results["ערך צפוי EV"] = tender_results["ערך צפוי EV"] - tender_results["עלות_עיכוב_רישוי_צפויה"]
+        else:
+            tender_results["עלות_עיכוב_רישוי_צפויה"] = 0
 
     if check_mc or check_var:
         mc_summary, mc_sims = run_tender_monte_carlo(
@@ -1753,7 +1873,7 @@ def render_tender_module():
             st.dataframe(contract_detail, use_container_width=True, hide_index=True)
 
         if not licensing_detail.empty:
-            st.markdown("### רישוי / Markov")
+            st.markdown("### רישוי והיתרים")
             st.dataframe(licensing_detail, use_container_width=True, hide_index=True)
 
         if not mc_summary.empty:
