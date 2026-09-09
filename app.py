@@ -114,10 +114,18 @@ st.markdown(
         padding-bottom: 3rem;
     }
 
+    /* רקע בהיר קבוע לתפריט הצד + צבע טקסט כהה קבוע לצידו (חובה יחד):
+       בלי שורת הצבע הזו, הטקסט בתפריט הצד מקבל את צבע ברירת המחדל של
+       העיצוב (בהיר, לתצוגה על רקע כהה) — ואז אצל מבקר שהדפדפן/המחשב שלו
+       במצב כהה (Dark Mode) הטקסט יוצא כמעט בלתי-קריא: בהיר על רקע בהיר. */
     section[data-testid="stSidebar"] {
         direction: rtl;
         text-align: right;
         background-color: #f1f5f9;
+    }
+
+    section[data-testid="stSidebar"] * {
+        color: #0f172a !important;
     }
 
     h1, h2, h3, h4, h5, h6, p, label {
@@ -3385,6 +3393,8 @@ def render_project_controls_manual():
                 }
             )
 
+        st.subheader("שלב 5 — הגדרות מתקדמות (אופציונלי)")
+
         with st.expander("הגדרות מתקדמות"):
             adv_col1, adv_col2 = st.columns(2)
 
@@ -3394,11 +3404,18 @@ def render_project_controls_manual():
                     min_value=1000,
                     max_value=50000,
                     value=10000,
-                    step=1000
+                    step=1000,
+                    help="כמה תרחישים אקראיים להריץ. יותר = תוצאה מדויקת יותר אך חישוב איטי יותר. ברירת המחדל מתאימה לרוב המקרים."
                 )
 
             with adv_col2:
-                random_seed = st.number_input("Seed אקראיות", min_value=1, value=42, step=1)
+                random_seed = st.number_input(
+                    "Seed אקראיות",
+                    min_value=1,
+                    value=42,
+                    step=1,
+                    help="מספר שקובע את נקודת ההתחלה של הגרלת התרחישים. אותו Seed עם אותם נתונים ייתן תמיד את אותה תוצאה — שימושי לשחזור חישוב קודם. אין צורך לשנות אותו."
+                )
 
         run_manual = st.form_submit_button(
             "הרץ ניתוח פרויקט",
