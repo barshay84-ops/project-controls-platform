@@ -3253,6 +3253,36 @@ def build_manual_risks_df(ui_df):
     return pd.DataFrame(rows)
 
 
+def is_untouched_default_manual_data(tasks_ui_df, links_ui_df, risks_ui_df, target_duration, confidence_level):
+    """
+    בודק אם המשתמש הריץ ניתוח מבלי לשנות כלום מנתוני ברירת המחדל/הדוגמה —
+    כדי להזהיר שהתוצאות לא משקפות פרויקט אמיתי.
+    """
+    try:
+        tasks_match = tasks_ui_df.reset_index(drop=True).equals(
+            default_manual_task_df().reset_index(drop=True)
+        )
+    except Exception:
+        tasks_match = False
+
+    try:
+        links_empty = links_ui_df.dropna(how="all").empty
+    except Exception:
+        links_empty = True
+
+    try:
+        risks_empty = risks_ui_df.dropna(how="all").empty
+    except Exception:
+        risks_empty = True
+
+    try:
+        targets_match = (float(target_duration) == 30.0) and (float(confidence_level) == 0.85)
+    except Exception:
+        targets_match = False
+
+    return tasks_match and links_empty and risks_empty and targets_match
+
+
 def render_project_controls_manual():
     st.write(
         "ממלאים את נתוני הפרויקט ישירות כאן באתר — בלי צורך בקובץ Excel. "
@@ -3417,6 +3447,11 @@ def render_project_controls_manual():
                     help="מספר שקובע את נקודת ההתחלה של הגרלת התרחישים. אותו Seed עם אותם נתונים ייתן תמיד את אותה תוצאה — שימושי לשחזור חישוב קודם. אין צורך לשנות אותו."
                 )
 
+        confirm_demo_data = st.checkbox(
+            "ידוע לי שלא ערכתי את שורת הדוגמה בשלב 1, ואני רוצה להריץ בכל זאת ניתוח הדגמה בלבד "
+            "(לא ניתוח של פרויקט אמיתי)"
+        )
+
         run_manual = st.form_submit_button(
             "הרץ ניתוח פרויקט",
             use_container_width=True
@@ -3429,6 +3464,22 @@ def render_project_controls_manual():
     st.session_state["manual_task_df"] = tasks_ui_df
     st.session_state["manual_link_df"] = links_ui_df
     st.session_state["manual_risk_df"] = risks_ui_df
+
+    if is_untouched_default_manual_data(
+        tasks_ui_df, links_ui_df, risks_ui_df, target_duration, confidence_level
+    ) and not confirm_demo_data:
+        st.warning(
+            "⚠️ **שים לב — אלו נתוני הדוגמה, לא נתוני הפרויקט שלך.**\n\n"
+            "הטבלה בשלב 1 עדיין מכילה רק את השורה המובנית לדוגמה ('תכנון ראשוני', 10 ימים), "
+            "ומשך היעד ורמת הביטחון עדיין בערכי ברירת המחדל (30 ימים, 85%). "
+            "אם תריץ עכשיו, התוצאות (KPI-ים, אחוזונים, המלצות) יתארו את הדוגמה הזו בלבד — "
+            "ולא ישקפו שום דבר אמיתי על הפרויקט שלך, גם אם הן ייראו מלאות ומקצועיות.\n\n"
+            "**כדי לקבל ניתוח אמיתי:** ערוך את הטבלה בשלב 1 עם הפעילויות האמיתיות של הפרויקט שלך "
+            "(שמות, משכים, ואם ידוע — טווחים אופטימי/פסימי ועלויות), ועדכן את משך היעד ורמת הביטחון בשלב 3 לפי הפרויקט. "
+            "לאחר מכן לחץ שוב על 'הרץ ניתוח פרויקט'.\n\n"
+            "אם רצית רק לראות הדגמה של איך הכלי עובד — סמן את התיבה מעל הכפתור ולחץ שוב."
+        )
+        return
 
     try:
         tasks_raw = build_manual_tasks_df(tasks_ui_df, uncertainty_level=uncertainty_level)
@@ -3473,6 +3524,12 @@ def render_project_controls_manual():
             st.error("אירעה שגיאה במהלך הניתוח.")
             st.exception(e)
             return
+
+    if confirm_demo_data:
+        st.warning(
+            "⚠️ התוצאות שלמטה מבוססות על נתוני הדוגמה בלבד (לא נתוני פרויקט אמיתיים) — "
+            "זו הרצת הדגמה שביקשת."
+        )
 
     render_project_control_results(output)
 
